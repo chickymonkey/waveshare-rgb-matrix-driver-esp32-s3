@@ -115,12 +115,6 @@ psram:
 # Enable logging
 logger:
   level: DEBUG
-api:
-#  encryption:
-#    key: "dcww9b3QKtjPfz6V3rtv1DU07cjnUkTCdRzg3o3seVY="
-ota:
-  - platform: esphome
-    password: "ffdc6ab165f21c0061c0d10898d8d0ee"
 
 wifi:
   id: wifi_component
