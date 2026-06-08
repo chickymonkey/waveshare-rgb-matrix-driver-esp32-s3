@@ -1,0 +1,2100 @@
+#Version
+#1.1 added zombie animation, star blinking
+#1.2 added block , coin, mario animation
+## ref: https://github.com/esphome/esphome/blob/dev/esphome/components/hub75/display.py
+#####https://api-docs.esphome.io/classesphome_1_1hub75_1_1_h_u_b75_display
+## changed waveshare: https://docs.waveshare.net/ESP32-S3-RGB-Matrix/
+---
+substitutions:
+  font_family_clock: Roboto
+  font_glyphsets: "GF_Latin_Core"
+  monday: Mon
+  tuesday: Tue
+  wednesday: Wed
+  thursday: Thu
+  friday: Fri
+  saturday: Sat
+  sunday: Sun
+
+  jan: Jan
+  feb: Feb
+  mar: Mar
+  apr: Apr
+  may: May
+  jun: Jun
+  jul: Jul
+  aug: Aug
+  sept: Sep
+  oct: Oct
+  nov: Nov
+  dec: Dec
+  #brightness 
+  day_brightness: 35
+  night_brightness: 15
+  latenight_brightness: 5
+  
+  #voice assistant
+  loading_illustration_background_color: "000000"
+  idle_illustration_background_color: "000000"
+  listening_illustration_background_color: "FFFFFF"
+  thinking_illustration_background_color: "FFFFFF"
+  replying_illustration_background_color: "FFFFFF"
+  error_illustration_background_color: "000000"
+
+  voice_assist_idle_phase_id: "1"
+  voice_assist_listening_phase_id: "2"
+  voice_assist_thinking_phase_id: "3"
+  voice_assist_replying_phase_id: "4"
+  voice_assist_not_ready_phase_id: "10"
+  voice_assist_error_phase_id: "11"
+  voice_assist_muted_phase_id: "12"
+  voice_assist_timer_finished_phase_id: "20"
+esphome:
+  name: matrix-clock
+  friendly_name: Matrix Clock
+  on_boot:
+    - priority: -100
+      then:
+        - script.execute: select_display_page
+        - component.update: matrix_display
+        - lambda: |- # gyroscope
+            ESP_LOGI("QMI8658", "Initializing...");
+
+            // WHO_AM_I check
+            uint8_t whoami_reg = 0x00;
+            uint8_t whoami = 0;
+            if (id(i2c_adc_dac)->write_readv(0x6B, &whoami_reg, 1, &whoami, 1) == i2c::ERROR_OK) {
+              ESP_LOGI("QMI8658", "WHO_AM_I = 0x%02X (expect 0x05)", whoami);
+            } else {
+              ESP_LOGE("QMI8658", "WHO_AM_I read failed - check wiring/address");
+            }
+
+            // CTRL1: interface config (auto-increment, INT active-high push-pull)
+            uint8_t ctrl1[] = {0x02, 0x60};
+            id(i2c_adc_dac)->write(0x6B, ctrl1, 2);
+
+            // CTRL2: accel ±2g, 125Hz ODR
+            uint8_t ctrl2[] = {0x03, 0x04};
+            id(i2c_adc_dac)->write(0x6B, ctrl2, 2);
+
+            // CTRL3: gyro ±512dps, 125Hz ODR  
+            uint8_t ctrl3[] = {0x04, 0x54};
+            id(i2c_adc_dac)->write(0x6B, ctrl3, 2);
+
+            // CTRL7: enable accel + gyro
+            uint8_t ctrl7[] = {0x08, 0x03};
+            id(i2c_adc_dac)->write(0x6B, ctrl7, 2);
+
+            ESP_LOGI("QMI8658", "Init complete");
+
+    - priority: 600
+      then:
+        - delay: 10s
+        - script.execute: play_mario_sound
+
+esp32:
+  board: esp32-s3-devkitc-1-n32r8v
+  flash_size: 32MB
+  partitions: partitions32mb.csv
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_SPIRAM: "y"
+      CONFIG_ESP32S3_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      #experimental
+    advanced:
+      enable_idf_experimental_features: true
+      execute_from_psram: true
+      compiler_optimization: "PERF"
+psram:
+  mode: octal
+  speed: 80MHz
+
+# Enable logging
+logger:
+  level: DEBUG
+api:
+#  encryption:
+#    key: "dcww9b3QKtjPfz6V3rtv1DU07cjnUkTCdRzg3o3seVY="
+ota:
+  - platform: esphome
+    password: "ffdc6ab165f21c0061c0d10898d8d0ee"
+
+wifi:
+  id: wifi_component
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Digi-Clock Hotspot"
+    password: "wifi12345"
+
+captive_portal:
+globals:
+  - id: page_no
+    type: int
+    restore_value: True
+    initial_value: '1'
+
+  - id: page_count
+    type: int
+    restore_value: no
+    initial_value: '3'
+
+  ## === Mario global===
+  - id: mario_x
+    type: int
+    initial_value: '6'
+
+  - id: mario_y
+    type: int
+    initial_value: '27'
+
+  # Mario colors
+  - id: col_red
+    type: Color
+    initial_value: 'Color(200, 0, 0)'
+
+  - id: col_skin
+    type: Color
+    initial_value: 'Color(255, 185, 120)'
+
+  - id: col_brown
+    type: Color
+    initial_value: 'Color(100, 55, 25)'
+
+  - id: col_black
+    type: Color
+    initial_value: 'Color(10, 10, 10)'
+
+  # Mario Animation state machine
+  - id: mario_anim_state
+    type: int
+    initial_value: '0'
+
+  - id: mario_anim_tick
+    type: int
+    initial_value: '0'
+
+  - id: mario_base_y
+    type: int
+    initial_value: '27'
+
+  - id: block_base_y
+    type: int
+    initial_value: '3'
+
+  # Colors
+  - id: col_lime
+    type: Color
+    initial_value: 'Color(65, 175, 46)'
+
+  - id: col_blue
+    type: Color
+    initial_value: 'Color(63, 63, 181)'
+
+  - id: col_yellow
+    type: Color
+    initial_value: 'Color(255, 255, 0)'
+
+  - id: col_orange
+    type: Color
+    initial_value: 'Color(255, 87, 34)'
+
+  - id: col_light_blue
+    type: Color
+    initial_value: 'Color(120, 180, 220)'
+
+  - id: col_shoe
+    type: Color
+    initial_value: 'Color(60, 30, 10)'
+
+  # Foreground / scene colors
+  - id: col_white
+    type: Color
+    initial_value: 'Color(240, 240, 240)'
+
+  - id: col_panel_border
+    type: Color
+    initial_value: 'Color(200, 40, 0)'
+
+  - id: col_bush
+    type: Color
+    initial_value: 'Color(144, 253, 117)'
+
+  - id: col_green
+    type: Color
+    initial_value: 'Color(0, 144, 90)'
+
+  - id: col_grey
+    type: Color
+    initial_value: 'Color(120,120,120)'
+
+  - id: col_ground_fill
+    type: Color
+    initial_value: 'Color(55, 21, 11)'
+
+  - id: col_mario_skin2
+    type: Color
+    initial_value: 'Color(220, 190, 150)'
+
+  - id: col_gold
+    type: Color
+    initial_value: 'Color(255, 235, 59)'
+  - id: col_sky
+    type: Color
+    initial_value: 'Color(120, 110, 255)'
+
+  # Pipe position
+  - id: pipe_x
+    type: int
+    initial_value: '42'
+
+  - id: pipe_y
+    type: int
+    initial_value: '32'
+
+  # Stars
+  - id: twinkle_index
+    type: int
+    initial_value: '0'
+
+  # ===== Minecraft Colors =====
+  - id: mc_dirt
+    type: Color
+    initial_value: 'Color(121, 85, 58)'
+
+  - id: mc_dirt_dark
+    type: Color
+    initial_value: 'Color(100, 70, 45)'
+
+  - id: mc_dirt_light
+    type: Color
+    initial_value: 'Color(145, 110, 85)'
+
+  - id: mc_grass
+    type: Color
+    initial_value: 'Color(95, 160, 40)'
+
+  - id: mc_grass_dark
+    type: Color
+    initial_value: 'Color(65, 125, 30)'
+
+  - id: mc_white
+    type: Color
+    initial_value: 'Color(255, 255, 255)'
+
+  # Steve
+  - id: steve_hair
+    type: Color
+    initial_value: 'Color(157, 82, 48)'
+
+  - id: steve_skin
+    type: Color
+    initial_value: 'Color(255, 160, 210)'
+
+  - id: steve_eye
+    type: Color
+    initial_value: 'Color(9, 71, 185)'
+
+  - id: steve_shirt
+    type: Color
+    initial_value: 'Color(8, 220, 194)'
+
+  - id: steve_pants
+    type: Color
+    initial_value: 'Color(0, 60, 180)'
+
+  - id: steve_sword
+    type: Color
+    initial_value: 'Color(200, 200, 200)'
+
+  - id: steve_sword_dark
+    type: Color
+    initial_value: 'Color(120, 120, 120)'
+
+  # Zombie movement
+  - id: zombie_offset
+    type: int
+    initial_value: '0'
+
+  - id: zombie_dir
+    type: int
+    initial_value: '-1'
+
+  - id: zombie_last_step
+    type: uint32_t
+    initial_value: '0'
+
+  # Screen rotation
+  - id: screen_laid
+    type: bool
+    restore_value: 'True'
+    initial_value: 'false'
+
+  #Voice assistant
+  - id: init_in_progress
+    type: bool
+    restore_value: false
+    initial_value: "true"
+  - id: voice_assistant_phase
+    type: int
+    restore_value: false
+    initial_value: ${voice_assist_not_ready_phase_id}
+  - id: global_first_active_timer
+    type: voice_assistant::Timer
+    restore_value: false
+  - id: global_is_timer_active
+    type: bool
+    restore_value: false
+  - id: global_first_timer
+    type: voice_assistant::Timer
+    restore_value: false
+  - id: global_is_timer
+    type: bool
+    restore_value: false
+
+  - id: local_volume_adjusting
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: local_volume_value
+    type: float
+    restore_value: yes
+    initial_value: '0.6'
+  ##Voice assistant color:
+  - id: marquee_offset
+    type: int
+    restore_value: no
+    initial_value: '0'
+button:
+  - platform: restart
+    id: reboot_btn
+    name: "Reboot Clock"
+
+number:
+  - platform: template
+    name: "Brightness"
+    id: led_brightness
+    min_value: 0
+    max_value: 100
+    step: 2
+    optimistic: true
+    initial_value: ${day_brightness}
+    set_action:
+      - lambda: |-
+          id(matrix_display).set_brightness(x);
+interval:
+  - interval: 1400ms
+    id: twinkle_stars
+    then:
+      - lambda: |-
+          bool day = id(sunstate).is_above_horizon();
+          if (id(screen_laid)) return;
+          if (id(page_no) != 1) return;
+          if (day) return;
+          if (!day) {
+            // Night star twinkle
+            id(twinkle_index) = (id(twinkle_index) + 1) % 2;
+          }
+          //Show page based on selection
+          if (id(display_page).state == "Mario")  {
+            id(matrix_display).show_page(id(mario_page));
+          } else if (id(display_page).state == "Minecraft")  {
+            id(matrix_display).show_page(id(minecraft_page));
+          }
+          id(matrix_display).update();
+  
+  - interval: 200ms
+    id: mario_animation
+    then:
+      - lambda: |-
+          if (id(page_no) != 1) return;  // only run on Mario page
+
+          id(mario_anim_tick) += 1;
+
+          switch (id(mario_anim_state)) {
+
+            case 0:  // IDLE — wait ~2.5 seconds then start jump: 12 x 200ms
+              if (id(mario_anim_tick) >= 12) {
+                id(mario_anim_state) = 1;
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+
+            case 1:  // JUMPING UP — 3 pixel
+              id(mario_y) = id(mario_base_y) - 3;
+              if (id(mario_anim_tick) >= 1) {
+                id(mario_anim_state) = 4;   // ← go to delay state, not hit
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+
+            case 4:  // DELAY — mario holds at peak for ~400ms before block moves
+              if (id(mario_anim_tick) >= 1) {   // 1 ticks × 400ms = 400ms
+                id(mario_anim_state) = 2;
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+
+            case 2:  // HIT — block bumps for ~400ms
+              if (id(mario_anim_tick) >= 1) {   // 1 ticks × 400ms = 400ms
+                id(mario_anim_state) = 3;
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+
+            case 3:  // FALLING — mario returns to ground
+              id(mario_y) = id(mario_base_y);
+              if (id(mario_anim_tick) >= 1) {
+                id(mario_y)          = id(mario_base_y);
+                id(mario_anim_state) = 0;
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+          }
+
+          id(matrix_display).update();
+
+  - interval: 410ms
+    id: zombie_animation
+    then:
+      - lambda: |-
+          if (id(page_no) != 2) return;   // only run on Minecraft page
+
+          id(zombie_offset) += id(zombie_dir);
+
+          // Clamp and reverse at ends (range: 0 → -4 → 0)
+          if (id(zombie_offset) <= -4) {
+            id(zombie_offset) = -4;
+            id(zombie_dir) = +1;
+          } else if (id(zombie_offset) >= 0) {
+            id(zombie_offset) = 0;
+            id(zombie_dir) = -1;
+          }
+
+          id(matrix_display).update();
+
+  - interval: 800ms
+    id: rotation_reaction
+    then:
+      - lambda: |-
+          static bool laid = false;
+          float x = id(accel_z).state;
+          if (isnan(x)) return;
+          if (!laid && x < -0.65) {
+            id(screen_laid) = true;
+            laid = true;
+
+            ESP_LOGI("ROTATE", "=== Screen is laid down ===");
+            id(matrix_display).show_page(id(network_page));
+            id(matrix_display).set_brightness(15);
+            id(matrix_display).update();
+          }
+
+          // Back to standing screen
+          else if (laid && x < 0.13 && x > -0.65) {
+            id(screen_laid) = false;
+            laid = false;
+            ESP_LOGI("ROTATE", "=== Screen is up ===");
+            id(matrix_display).show_page(id(mario_page));
+            id(mario_anim_state) = 0;
+            id(mario_anim_tick)  = 0;
+            id(mario_y)          = id(mario_base_y);
+            id(matrix_display).set_brightness(15);
+            id(matrix_display).update();
+          }
+  - interval: 80ms
+    then:
+      - lambda: |
+          if (!id(global_is_timer_active) && !id(global_is_timer)) {
+            id(marquee_offset) = (id(marquee_offset) + 1) % 64;
+          }
+          id(matrix_display).update();
+i2c:
+  - id: i2c_adc_dac
+    #this is shared by SHTC3, QMI8658, and RTC
+    sda: GPIO47
+    scl: GPIO48
+    scan: true
+
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin: GPIO38
+    #i2s_lrclk_pin: GPIO13
+    i2s_bclk_pin: GPIO43
+    i2s_mclk_pin: GPIO12
+
+audio_adc:
+  - platform: es7210
+    id: es7210_adc
+    i2c_id: i2c_adc_dac
+    bits_per_sample: 16bit
+    sample_rate: 16000
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    i2c_id: i2c_adc_dac
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+microphone:
+  - platform: i2s_audio
+    id: box_mic
+    i2s_audio_id: i2s_audio_bus
+    #i2s_din_pin: GPIO12
+    i2s_din_pin: GPIO39
+    adc_type: external
+    sample_rate: 16000
+    bits_per_sample: 16bit
+output:
+  - platform: gpio
+    pin: GPIO11
+    id: pa_ctrl
+speaker:
+  - platform: i2s_audio
+    id: box_speaker
+    i2s_audio_id: i2s_audio_bus
+    i2s_dout_pin: GPIO21
+    dac_type: external
+    audio_dac: es8311_dac
+    channel: stereo
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    buffer_duration: 100ms
+
+media_player:
+  - platform: speaker
+    name: None
+    id: speaker_media_player
+    volume_min: 0.4
+    volume_max: 0.7
+    volume_initial: 0.6
+    task_stack_in_psram: true
+    announcement_pipeline:
+      speaker: box_speaker
+      format: MP3
+      sample_rate: 48000
+      num_channels: 2
+    files:
+      - id: timer_finished_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+      - id: mario_sound_main
+        file: /config/esphome/sound/super_mario_opening.flac
+    on_announcement:
+      # Stop the wake word (mWW or VA) if the mic is capturing
+      - if:
+          condition:
+            - microphone.is_capturing:
+          then:
+            - script.execute: stop_wake_word
+            # Ensure VA stops before moving on
+            - if:
+                condition:
+                  - lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+                then:
+                  - wait_until:
+                      - not:
+                          voice_assistant.is_running:
+      # Since VA isn't running, this is user-intiated media playback. Draw the mute display
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+            - script.execute: draw_display
+    on_idle:
+      # Since VA isn't running, this is the end of user-intiated media playback. Restart the wake word.
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - script.execute: start_wake_word
+            - script.execute: set_idle_or_mute_phase
+            - script.execute: draw_display
+
+micro_wake_word:
+  id: mww
+  models:
+    - hey_jarvis
+  on_wake_word_detected:
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+
+voice_assistant:
+  id: va
+  microphone: box_mic
+  media_player: speaker_media_player
+  micro_wake_word: mww
+  noise_suppression_level: 0
+  auto_gain: 31dBFS
+  volume_multiplier: 3.0
+  on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
+    - script.execute: draw_display
+    
+  on_stt_vad_end:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: draw_display
+
+  on_stt_end:
+    - script.execute: draw_display
+  on_tts_start:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+    - script.execute: draw_display
+
+  on_end:
+    # Wait a short amount of time to see if an announcement starts
+    - wait_until:
+        condition:
+          - media_player.is_announcing:
+        timeout: 1s
+    # Announcement is finished and the I2S bus is free
+    - wait_until:
+        - and:
+            - not:
+                media_player.is_announcing:
+            - not:
+                speaker.is_playing:
+    # Restart only mWW if enabled; streaming wake words automatically restart
+    - if:
+        condition:
+          - lambda: return id(wake_word_engine_location).state == "On device";
+        then:
+          - lambda: id(va).set_use_wake_word(false);
+          - micro_wake_word.start:
+    - script.execute: set_idle_or_mute_phase
+    - script.execute: draw_display
+
+  on_error:
+    - if:
+        condition:
+          lambda: return !id(init_in_progress);
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+          - script.execute: draw_display
+          - delay: 1s
+          - if:
+              condition:
+                switch.is_off: mute
+              then:
+                - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+              else:
+                - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+          - script.execute: draw_display
+  on_client_connected:
+    - lambda: id(init_in_progress) = false;
+    - script.execute: start_wake_word
+    - script.execute: set_idle_or_mute_phase
+    - script.execute: draw_display
+  on_client_disconnected:
+    - script.execute: stop_wake_word
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
+    - script.execute: draw_display
+  #timer
+  on_timer_started:
+    - script.execute: draw_display
+  on_timer_cancelled:
+    - script.execute: draw_display
+  on_timer_updated:
+    - script.execute: draw_display
+  on_timer_tick:
+    - script.execute: draw_display
+
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+
+    - component.update: matrix_display
+    #original setting.
+    - wait_until:
+        media_player.is_announcing:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_timer_finished_phase_id};
+    - script.execute: draw_display
+
+script:
+  - id: update_clock
+    then:
+      - component.update: matrix_display
+
+  - id: play_mario_sound
+    then:
+      - media_player.speaker.play_on_device_media_file:
+          media_file: mario_sound_main
+          announcement: true
+
+  - id: select_display_page
+    then:
+      - lambda: |-
+          if (id(display_page).state == "Mario") {
+            id(matrix_display).show_page(id(mario_page));
+          } else if (id(display_page).state == "Minecraft") {
+            id(matrix_display).show_page(id(minecraft_page));
+          } else if (id(display_page).state == "Network") {
+            id(matrix_display).show_page(id(network_page));
+          }
+      - component.update: matrix_display
+
+  - id: draw_display
+    then:
+      - lambda: |
+          // Define strip colors and pattern per voice_assistant_phase
+          // Rows 30-31 (bottom 2 pixels of 32-row display)
+          const int strip_y = 30;
+          const int width = 64;
+          const int segment = 8; // length of each colored segment in marquee
+          // --- Timer takes priority over marquee ---
+          id(check_if_timers_active).execute();
+          id(check_if_timers).execute();
+          if (id(global_is_timer_active) || id(global_is_timer)) {
+            id(draw_timer_timeline).execute();
+            return;  // stop here, skip the marquee
+          }
+          Color color1, color2;
+          bool skip_marquee = false;
+          switch (id(voice_assistant_phase)) {
+            case ${voice_assist_listening_phase_id}:
+              // Green breathing/moving strip - listening
+              color1 = Color(20, 140, 30);
+              color2 = Color(0, 80, 0);
+              break;
+            case ${voice_assist_thinking_phase_id}:
+              // Yellow chasing - thinking
+              color1 = Color(255, 200, 0);
+              color2 = Color(80, 60, 0);
+              break;
+            case ${voice_assist_replying_phase_id}:
+              // Cyan sweep - replying
+              color1 = Color(0, 200, 255);
+              color2 = Color(0, 60, 80);
+              break;
+            case ${voice_assist_error_phase_id}:
+              // Red flash - error
+              color1 = Color(255, 0, 0);
+              color2 = Color(60, 0, 0);
+              break;
+            case ${voice_assist_muted_phase_id}:
+              // Dim orange - muted
+              color1 = Color(180, 40, 0);
+              color2 = Color(140, 10, 0);
+              break;
+            case ${voice_assist_not_ready_phase_id}:
+              // Purple - not ready
+              color1 = Color(100, 0, 150);
+              color2 = Color(30, 0, 50);
+              break;
+            case ${voice_assist_timer_finished_phase_id}:
+              // White flash - timer done
+              color1 = Color(255, 255, 255);
+              color2 = Color(60, 60, 60);
+              break;
+            default:
+              // Idle: slow Brown brick style
+              skip_marquee = true;
+              color1 = id(col_ground_fill);
+              color2 = id(col_black);
+              break;
+          }
+          //Ground Row 29 always solid
+          for (int x = 0; x < width; x++) {
+            id(matrix_display).draw_pixel_at(x, 29, id(col_ground_fill));
+          }
+          //Row 30 and 31 in either static or marquee
+          if (skip_marquee) {
+            // Draw brick strip only, no marquee
+            const int brick_y = 30;
+            const int width   = 64;
+            
+            for (int row = 0; row < 2; row++) {
+              for (int x = 0; x < width; x++) {
+                Color c = (x % 6 == 0) ? id(col_black) : id(col_ground_fill);
+                id(matrix_display).draw_pixel_at(x, brick_y + row, c);
+              }
+            }
+            return;
+          }
+
+          int offset = id(marquee_offset);
+          for (int x = 0; x < width; x++) {
+            // Create alternating segments that scroll with offset
+            int pos = (x + offset) % (segment * 2);
+            Color c = (pos < segment) ? color1 : color2;
+            id(matrix_display).draw_pixel_at(x, strip_y,     c);
+            id(matrix_display).draw_pixel_at(x, strip_y + 1, c);
+          }
+
+  - id: fetch_first_active_timer
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          auto output_timer = *timers.begin();
+          for (const auto &timer : timers) {
+            if (timer.is_active && timer.seconds_left <= output_timer.seconds_left) {
+              output_timer = timer;
+            }
+          }
+          id(global_first_active_timer) = output_timer;
+  - id: check_if_timers_active
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          bool output = false;
+          for (const auto &timer : timers) {
+            if (timer.is_active) {
+              output = true;
+            }
+          }
+          id(global_is_timer_active) = output;
+  - id: fetch_first_timer
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          auto output_timer = *timers.begin();
+          for (const auto &timer : timers) {
+            if (timer.seconds_left <= output_timer.seconds_left) {
+              output_timer = timer;
+            }
+          }
+          id(global_first_timer) = output_timer;
+  - id: check_if_timers
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          bool output = false;
+          for (const auto &timer : timers) {
+            if (timer.is_active) {
+              output = true;
+            }
+          }
+          id(global_is_timer) = output;    
+
+  - id: draw_timer_timeline
+    then:
+      - lambda: |
+          id(check_if_timers_active).execute();
+          id(check_if_timers).execute();
+          if (id(global_is_timer_active)) {
+            id(fetch_first_active_timer).execute();
+            int active_pixels = round( 64.0 * id(global_first_active_timer).seconds_left / max(id(global_first_active_timer).total_seconds, static_cast<uint32_t>(1)) );
+            // Clear the row first
+            for (int x = 0; x < 64; x++) {
+              id(matrix_display).draw_pixel_at(x, 31, Color::BLACK);
+            }
+            // Draw progress in active color
+            for (int x = 0; x < active_pixels; x++) {
+              id(matrix_display).draw_pixel_at(x, 31, id(active_timer_color));
+            }
+          } else if (id(global_is_timer)) {
+            id(fetch_first_timer).execute();
+            int active_pixels = round( 64.0 * id(global_first_timer).seconds_left / max(id(global_first_timer).total_seconds, static_cast<uint32_t>(1)) );
+            // Clear the row first
+            for (int x = 0; x < 64; x++) {
+              id(matrix_display).draw_pixel_at(x, 31, Color::BLACK);
+            }
+            // Draw progress in paused color
+            for (int x = 0; x < active_pixels; x++) {
+              id(matrix_display).draw_pixel_at(x, 31, id(paused_timer_color));
+            }
+          }
+
+
+  # Starts either mWW or the streaming wake word, depending on the configured location
+  - id: start_wake_word
+    then:
+      - if:
+          condition:
+            and:
+              - not:
+                  - voice_assistant.is_running:
+              - lambda: return id(wake_word_engine_location).state == "On device";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - micro_wake_word.start:
+      - if:
+          condition:
+            and:
+              - not:
+                  - voice_assistant.is_running:
+              - lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+          then:
+            - lambda: id(va).set_use_wake_word(true);
+            - voice_assistant.start_continuous:
+  # Stops either mWW or the streaming wake word, depending on the configured location
+  - id: stop_wake_word
+    then:
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - voice_assistant.stop:
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).state == "On device";
+          then:
+            - micro_wake_word.stop:
+  # Set the voice assistant phase to idle or muted, depending on if the software mute switch is activated
+  - id: set_idle_or_mute_phase
+    then:
+      - if:
+          condition:
+            switch.is_off: mute
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          else:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+
+switch:
+  - platform: template
+    name: Mute
+    id: mute
+    icon: "mdi:microphone-off"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_off:
+      - microphone.unmute:
+      - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+      - script.execute: draw_display
+    on_turn_on:
+      - microphone.mute:
+      - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+      - script.execute: draw_display
+
+  - platform: output
+    name: "Speaker Enable"
+    output: pa_ctrl
+    restore_mode: ALWAYS_ON
+
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      # Turn off the repeat mode and disable the pause between playlist items
+      - lambda: |-
+              id(speaker_media_player)
+                ->make_call()
+                .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
+                .set_announcement(true)
+                .perform();
+              id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      # Stop playing the alarm
+      - media_player.stop:
+          announcement: true
+    on_turn_on:
+      # Turn on the repeat mode and pause for 1000 ms between playlist items/repeats
+      - lambda: |-
+            id(speaker_media_player)
+              ->make_call()
+              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
+              .set_announcement(true)
+              .perform();
+            id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
+      #make sure volume is not too small for alarm.
+      - speaker.volume_set:
+          id: box_speaker
+          volume: 60%
+
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_sound
+          announcement: true
+      ##play for 30s.
+      - delay: 30s
+      - switch.turn_off: timer_ringing
+
+  - platform: template
+    id: local_media_mute
+    icon: 'mdi:volume-off'
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      then:
+        - homeassistant.action:
+            action: media_player.volume_set
+            data:
+              entity_id: media_player.speaker_media_player
+              volume_level: "0"
+    on_turn_off:
+      - homeassistant.action:
+          action: media_player.volume_set
+          data:
+            entity_id: media_player.speaker_media_player
+            volume_level: !lambda 'return id(local_volume_value);'
+
+display:
+  - platform: hub75
+    id: matrix_display
+    clock_speed: 16MHZ
+    board: adafruit-matrix-portal-s3
+    shift_driver: ICN2038S
+    double_buffer: True  #This stops the whole screen flicking when animation.
+    panel_width: 64
+    panel_height: 32
+    brightness: ${day_brightness}
+    bit_depth: 5
+    #update_interval: never
+    update_interval: 33ms
+    scan_wiring: STANDARD_TWO_SCAN
+    #Pins color.
+    r1_pin: GPIO4
+    g1_pin: GPIO6
+    b1_pin: GPIO5
+    r2_pin: GPIO7
+    g2_pin: GPIO16
+    b2_pin: GPIO15
+    a_pin: GPIO18
+    b_pin: GPIO8
+    c_pin: GPIO3
+    d_pin: GPIO42
+    e_pin: GPIO9
+    clk_pin: GPIO41
+    oe_pin: GPIO2
+    lat_pin: GPIO40
+    pages:
+      - id: mario_page
+        lambda: |-
+          // Sky color
+            bool day = id(sunstate).is_above_horizon();
+
+            if (day) {
+              it.fill(id(col_sky));  // daytime sky
+            } else {
+              it.fill(id(col_black));  // black night sky
+            }
+            auto now = id(sntp_time).now();
+            if (!now.is_valid()) {
+              it.print(4, 10, id(TickingTimebomb), "Syncing ...");
+              return;
+            }
+            // ===== BUSH1 =====
+            it.filled_circle(19, 29, 3, id(col_bush));
+            it.filled_circle(23, 26, 3, id(col_bush));
+            it.filled_circle(25, 29, 3, id(col_bush));
+            it.filled_circle(27, 29, 3, id(col_bush));
+            
+            // ================= PIPE (8x7)
+            int pix = id(pipe_x);
+            int piy = id(pipe_y);
+            // Top-left corner of pipe:
+            int x0 = pix - 5;
+            int y0 = piy - 11;
+            // ----- PIPE Row 1 -----
+            for (int x = 0; x < 8; x++)
+              it.draw_pixel_at(x0+x, y0+1, id(col_black));
+            
+            // ----- PIPE Row 2 -----
+            it.draw_pixel_at(x0+0, y0+2, id(col_black));
+            it.draw_pixel_at(x0+1, y0+2, id(col_green));
+            it.draw_pixel_at(x0+2, y0+2, id(col_green));
+            it.draw_pixel_at(x0+3, y0+2, id(col_green));
+            it.draw_pixel_at(x0+4, y0+2, id(col_green));
+            it.draw_pixel_at(x0+5, y0+2, id(col_green));
+            it.draw_pixel_at(x0+6, y0+2, id(col_green));
+            it.draw_pixel_at(x0+7, y0+2, id(col_black));
+            
+            // ----- Row 4 -----
+            it.draw_pixel_at(x0+0, y0+3, id(col_black));
+            it.draw_pixel_at(x0+1, y0+3, id(col_green));
+            it.draw_pixel_at(x0+2, y0+3, id(col_green));
+            it.draw_pixel_at(x0+3, y0+3, id(col_green));
+            it.draw_pixel_at(x0+4, y0+3, id(col_green));
+            it.draw_pixel_at(x0+5, y0+3, id(col_green));
+            it.draw_pixel_at(x0+6, y0+3, id(col_green));
+            it.draw_pixel_at(x0+7, y0+3, id(col_black));
+            
+            // ----- Row 5 -----
+            for (int x = 0; x < 8; x++) {
+              it.draw_pixel_at(x0+x, y0+4, id(col_black));
+            }
+            
+            // ----- Rows 6–9 (pipe stem) -----
+            for (int y = 5; y <= 8; y++) {
+              it.draw_pixel_at(x0+1, y0+y, id(col_black));
+              it.draw_pixel_at(x0+2, y0+y, id(col_green));
+              it.draw_pixel_at(x0+3, y0+y, id(col_green));
+              it.draw_pixel_at(x0+4, y0+y, id(col_green));
+              it.draw_pixel_at(x0+5, y0+y, id(col_green));
+              it.draw_pixel_at(x0+6, y0+y, id(col_black));
+            }
+
+            // ===== QUESTION BLOCK =====
+            int block_base_y = id(mario_base_y) - 14 - 9 - 1;
+            //bump up by 2 pixel
+            int block_bump = (id(mario_anim_state) == 2) ? -2 : 0;
+            int block_x0 = 2;
+            int block_y0 = block_base_y + block_bump;
+            // Gold background
+            for (int dx = 0; dx < 9; dx++)
+              for (int dy = 0; dy < 9; dy++)
+                it.draw_pixel_at(block_x0+dx, block_y0+dy, id(col_gold));
+            // top border
+            for (int i = 0; i < 9; i++)
+              it.draw_pixel_at(block_x0+i, block_y0+0, id(col_brown));
+            // bottom border
+            for (int i = 0; i < 9; i++)
+              it.draw_pixel_at(block_x0+i, block_y0+8, id(col_black));
+            // left border
+            for (int i = 1; i < 8; i++)
+              it.draw_pixel_at(block_x0+0, block_y0+i, id(col_brown));
+            // right border
+            for (int i = 1; i < 8; i++)
+              it.draw_pixel_at(block_x0+8, block_y0+i, id(col_black));
+            if (id(mario_anim_state) == 0 || id(mario_anim_state) == 1) {
+              // ? mark in brown
+              it.draw_pixel_at(block_x0+3, block_y0+2, id(col_brown));
+              it.draw_pixel_at(block_x0+4, block_y0+2, id(col_brown));
+              it.draw_pixel_at(block_x0+5, block_y0+2, id(col_brown));
+              it.draw_pixel_at(block_x0+5, block_y0+3, id(col_brown));
+              it.draw_pixel_at(block_x0+4, block_y0+4, id(col_brown));
+              it.draw_pixel_at(block_x0+4, block_y0+5, id(col_brown));
+              it.draw_pixel_at(block_x0+4, block_y0+7, id(col_brown));
+            }
+            // ===== COIN =====
+            const char COIN[7][6] = {
+              " GGG ",
+              "GWGGG",
+              "GWGYG",
+              "GWGYG",
+              "GWGYG",
+              "GWGGG",
+              " GGG "
+            };
+            // ---- draw coin helper (5x9) ----
+            auto draw_coin = [&](int COIN_X, int COIN_Y) {
+              for (int y = 0; y < 7; y++) {
+                for (int x = 0; x < 5; x++) {
+
+                  Color c;
+                  bool draw = true;
+
+                  switch (COIN[y][x]) {
+                    case 'G': c = id(col_gold);   break;
+                    case 'W': c = id(col_white);  break;
+                    case 'Y': c = id(col_orange); break;
+                    default:  draw = false;
+                  }
+
+                  if (draw) {
+                    it.draw_pixel_at(
+                      COIN_X + x,
+                      COIN_Y + y,
+                      c
+                    );
+                  }
+                }
+              }
+            };
+
+            //Draw two coins
+            //draw_coin(50, 21);
+            draw_coin(57, 13);
+
+            // ===== CLOUD1 =====
+            const int cloud1_offsets[4] = { -3, -1, 1, 3 };
+            if (day) {
+              int x_cloud1 = 26;
+              int y_cloud1 = 2;
+              it.filled_circle(x_cloud1 - 2, y_cloud1,     2, id(col_white));
+              it.filled_circle(x_cloud1,     y_cloud1 - 1, 2, id(col_white));
+              it.filled_circle(x_cloud1 + 2, y_cloud1,     2, id(col_white));
+              it.filled_rectangle(x_cloud1 - 3, y_cloud1 + 1, 6, 2, id(col_white));
+            }
+
+            
+            // --- Right: Weather icon with animation---
+
+            std::string weather_stat = id(ha_weather_state).state;
+            std::string ws;
+            if (!weather_stat.empty() || weather_stat != "unknown" || weather_stat != "unavailable") {
+                ws = weather_stat;
+                std::transform(ws.begin(), ws.end(), ws.begin(), ::tolower);
+            } else {
+                ws = "";
+            }
+
+            const char* icon = "\U000F0590";
+            Color icon_color = id(col_white);
+            bool is_rain = false;
+
+            if (weather_stat == "sunny") {
+                icon = "\U000F05A8";
+                icon_color = id(col_yellow);
+
+            } else if (ws.find("rain") != std::string::npos) {
+                icon = "\U000F0590";   // cloudy icon for rain
+                icon_color = id(col_white);
+                is_rain = true;
+
+            } else if (weather_stat == "lightning" || weather_stat == "lightning-rainy") {
+                icon = "\U000F0593";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "windy" || weather_stat == "windy-variant") {
+                icon = "\U000F059D";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "clear-night" || weather_stat == "clearnight") {
+                icon = "\U000F0594";
+                icon_color = id(col_white);
+
+            } else if (ws.find("cloud") != std::string::npos) {
+                icon = "\U000F0590";
+                icon_color = id(col_white);
+            }
+
+            // Draw icon
+            it.printf(
+                59, 3,
+                id(icon_font_9),
+                icon_color,
+                TextAlign::CENTER,
+                "%s",
+                icon
+            );
+
+            // 3 Rain drop animation overlay
+            auto draw_rain = [&](int drop_x1, int drop_start_y) {
+                int drop_x2 = drop_x1 + 2;
+                int drop_x3 = drop_x1 + 4;
+
+                uint32_t fall_dur    = 500;
+                uint32_t stagger     = fall_dur * 6 / 10;
+                uint32_t period      = stagger * 3;
+                uint32_t visible     = fall_dur * 4 / 5;
+                uint32_t drop_travel = 4;
+
+                uint32_t t = millis() % period;
+
+                auto draw_drop = [&](int x, uint32_t phase_offset) {
+                    uint32_t lt = (t + period - phase_offset) % period;
+                    if (lt < fall_dur) {
+                        int offset = (int)(lt * drop_travel) / (int)fall_dur;
+                        if (lt < visible) {
+                            it.draw_pixel_at(x, drop_start_y + offset,     id(col_white));
+                            it.draw_pixel_at(x, drop_start_y + offset + 1, id(col_white));
+                        }
+                    }
+                };
+
+                draw_drop(drop_x1, 0);
+                draw_drop(drop_x2, stagger);
+                draw_drop(drop_x3, stagger * 2);
+            };
+            
+            if (is_rain){
+              draw_rain(57, 6);
+            }
+              
+            // temperature
+            if (id(study_temp).has_state()) {
+              it.printf(55, 25, id(font_small), TextAlign::CENTER, "%.0f°C", id(study_temp).state);
+            } else {
+              it.print(55, 25, id(font_small), TextAlign::CENTER, "...");
+            }
+
+            // ==== stars twinkle at night===
+            if (!day) {
+              int sx1 = 14;
+              int sy1 = 3;
+              int sx2 = 44;
+              int sy2 = 2;
+
+              // --- base stars (dim) ---
+              auto draw_star_small = [&](int x, int y, Color c) {
+                it.draw_pixel_at(x, y, c);
+              };
+
+              draw_star_small(sx1, sy1, id(col_white));
+              draw_star_small(sx2, sy2, id(col_white));
+
+              // --- twinkling star (bright, plus-shaped) ---
+              int x, y;
+              if (id(twinkle_index) == 0)      { x = sx1; y = sy1; }
+              else { x = sx2; y = sy2; }
+
+              it.draw_pixel_at(x,     y,     id(col_white));
+              it.draw_pixel_at(x - 1, y,     id(col_white));
+              it.draw_pixel_at(x + 1, y,     id(col_white));
+              it.draw_pixel_at(x,     y - 1, id(col_white));
+              it.draw_pixel_at(x,     y + 1, id(col_white));
+            }
+            //=== Clock Panel
+            int box_x = 16;
+            int box_y = 5;
+            int box_w = 39;
+            int box_h = 16;
+            it.filled_rectangle(box_x, box_y, box_w, box_h, id(col_white));
+            it.rectangle(box_x, box_y, box_w, box_h, id(col_panel_border));
+            it.draw_pixel_at(box_x,           box_y,           id(col_black));
+            it.draw_pixel_at(box_x+box_w-1,   box_y,           id(col_black));
+            it.draw_pixel_at(box_x,           box_y+box_h-1,   id(col_black));
+            it.draw_pixel_at(box_x+box_w-1,   box_y+box_h-1,   id(col_black));    
+            // ===== TIME =====
+            char time_str[8];
+            sprintf(time_str, "%02d:%02d", now.hour, now.minute);    
+            int x1, y1, w, h;
+            it.get_text_bounds(0, 0, time_str, id(TickingTimebomb), TextAlign::TOP_LEFT, &x1, &y1, &w, &h);
+                
+            int tx = box_x + (box_w - w) / 2;
+            int ty = box_y - 1 + (box_h - h) / 2 ;
+            
+            // ===== CLOCK CLEAR AREA
+            it.filled_rectangle(box_x+1, box_y+1, box_w-2, box_h-2, id(col_white));
+                
+            it.print(tx, ty, id(TickingTimebomb), id(col_black), time_str);
+
+            // ===== MARIO =====
+            int px = id(mario_x);
+            int py = id(mario_y);    
+            // ----- Hat -----
+            // Row 0 – Hat1 top
+            it.draw_pixel_at(px-2, py-14, id(col_red));
+            it.draw_pixel_at(px-1, py-14, id(col_red));
+            it.draw_pixel_at(px,   py-14, id(col_red));
+            it.draw_pixel_at(px+1, py-14, id(col_red));
+            it.draw_pixel_at(px+2, py-14, id(col_red));
+
+            // Row 1 – Hat2 brim
+            it.draw_pixel_at(px-3, py-13, id(col_red));
+            it.draw_pixel_at(px-2, py-13, id(col_red));
+            it.draw_pixel_at(px-1, py-13, id(col_red));
+            it.draw_pixel_at(px,   py-13, id(col_red));
+            it.draw_pixel_at(px+1, py-13, id(col_red));
+            it.draw_pixel_at(px+2, py-13, id(col_red));
+            it.draw_pixel_at(px+3, py-13, id(col_red));
+            it.draw_pixel_at(px+4, py-13, id(col_red));
+            it.draw_pixel_at(px+5, py-13, id(col_red));
+
+            // ----- Head1 ----- Hair (Brown)
+            it.draw_pixel_at(px-3, py-12, id(col_brown));
+            it.draw_pixel_at(px-2, py-12, id(col_brown));
+            it.draw_pixel_at(px-1, py-12, id(col_brown));
+            // ----- Head1 ----- Face (Skin)
+            it.draw_pixel_at(px, py-12, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-12, id(col_mario_skin2));
+            // ----- Head1 ----- Eye
+            it.draw_pixel_at(px+2, py-12, id(col_black));
+            it.draw_pixel_at(px+3,   py-12, id(col_mario_skin2));
+            // ----- Head2 ----- Face (Skin)
+            it.draw_pixel_at(px-4, py-11, id(col_brown));
+            it.draw_pixel_at(px-3, py-11, id(col_mario_skin2));
+            it.draw_pixel_at(px-2, py-11, id(col_brown));
+            it.draw_pixel_at(px-1, py-11, id(col_mario_skin2));
+            it.draw_pixel_at(px,   py-11, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-11, id(col_mario_skin2));
+            // ----- Head2 ----- eye
+            it.draw_pixel_at(px+2, py-11, id(col_black));
+            it.draw_pixel_at(px+3, py-11, id(col_mario_skin2));
+            it.draw_pixel_at(px+4, py-11, id(col_mario_skin2));
+            // ----- Head3 ----- Face (Skin)
+            it.draw_pixel_at(px-4, py-10, id(col_brown));
+            it.draw_pixel_at(px-3, py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px-2, py-10, id(col_brown));
+            it.draw_pixel_at(px-1, py-10, id(col_brown));
+            it.draw_pixel_at(px,   py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px+2, py-10, id(col_mario_skin2));
+            // ----- Head3 ----- eye
+            it.draw_pixel_at(px+3, py-10, id(col_black));
+            // ----- Head3 ----- skin
+            it.draw_pixel_at(px+4, py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px+5, py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px+6, py-10, id(col_mario_skin2));
+
+            // ----- Head4 ----- Face (Skin)
+            it.draw_pixel_at(px-4, py-9, id(col_brown));
+            it.draw_pixel_at(px-3, py-9, id(col_brown));
+            it.draw_pixel_at(px-2, py-9, id(col_mario_skin2));
+            it.draw_pixel_at(px-1, py-9, id(col_mario_skin2));
+            it.draw_pixel_at(px,   py-9, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-9, id(col_mario_skin2));
+            // ----- Head4 ----- mustache
+            it.draw_pixel_at(px+2, py-9, id(col_black));
+            it.draw_pixel_at(px+3, py-9, id(col_black));
+            it.draw_pixel_at(px+4, py-9, id(col_black));
+            it.draw_pixel_at(px+5, py-9, id(col_black));
+            // ----- Head5 ----- neck (Skin)
+            it.draw_pixel_at(px-2, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px-1, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px,   py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px+2, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px+3, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px+4, py-8, id(col_mario_skin2));
+
+            // ----- Shirt1 (Red) -----
+            it.draw_pixel_at(px-3, py-7, id(col_red));
+            it.draw_pixel_at(px-2, py-7, id(col_red));
+            it.draw_pixel_at(px-1, py-7, id(col_blue));
+            it.draw_pixel_at(px,   py-7, id(col_red));
+            it.draw_pixel_at(px+1, py-7, id(col_red));
+            it.draw_pixel_at(px+2, py-7, id(col_red));
+
+            // ----- Shirt2 (Red) -----
+            it.draw_pixel_at(px-4, py-6, id(col_red));
+            it.draw_pixel_at(px-3, py-6, id(col_red));
+            it.draw_pixel_at(px-2, py-6, id(col_red));
+            it.draw_pixel_at(px-1, py-6, id(col_blue));
+            it.draw_pixel_at(px,   py-6, id(col_red));
+            it.draw_pixel_at(px+1, py-6, id(col_red));
+            it.draw_pixel_at(px+2, py-6, id(col_blue));
+            it.draw_pixel_at(px+3, py-6, id(col_red));
+            it.draw_pixel_at(px+4, py-6, id(col_red));
+            it.draw_pixel_at(px+5, py-6, id(col_red));
+
+            // ----- Shirt3 (Red) -----
+            it.draw_pixel_at(px-5, py-5, id(col_red));
+            it.draw_pixel_at(px-4, py-5, id(col_red));
+            it.draw_pixel_at(px-3, py-5, id(col_red));
+            it.draw_pixel_at(px-2, py-5, id(col_red));
+            it.draw_pixel_at(px-1, py-5, id(col_blue));
+            it.draw_pixel_at(px,   py-5, id(col_blue));
+            it.draw_pixel_at(px+1, py-5, id(col_blue));
+            it.draw_pixel_at(px+2, py-5, id(col_blue));
+            it.draw_pixel_at(px+3, py-5, id(col_red));
+            it.draw_pixel_at(px+4, py-5, id(col_red));
+            it.draw_pixel_at(px+5, py-5, id(col_red));
+            it.draw_pixel_at(px+6, py-5, id(col_red));
+
+            // ----- Shirt4 Arms (Skin) -----
+            it.draw_pixel_at(px-5, py-4, id(col_mario_skin2));
+            it.draw_pixel_at(px-4, py-4, id(col_mario_skin2));
+
+            // ----- Shirt4 Arms Overalls (Blue) -----
+            it.draw_pixel_at(px-3, py-4, id(col_red));
+            it.draw_pixel_at(px-2, py-4, id(col_blue));
+            it.draw_pixel_at(px-1, py-4, id(col_yellow));
+            it.draw_pixel_at(px, py-4, id(col_blue));
+            it.draw_pixel_at(px+1, py-4, id(col_blue));
+            it.draw_pixel_at(px+2, py-4, id(col_yellow));
+            it.draw_pixel_at(px+3, py-4, id(col_blue));
+            it.draw_pixel_at(px+4, py-4, id(col_red));
+
+            // ----- Shirt5 belly Overalls (Blue) -----
+            it.draw_pixel_at(px-5, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px-4, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px-3, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px-2, py-3, id(col_blue));
+            it.draw_pixel_at(px-1, py-3, id(col_blue));
+            it.draw_pixel_at(px, py-3, id(col_blue));
+            it.draw_pixel_at(px+1, py-3, id(col_blue));
+            it.draw_pixel_at(px+2, py-3, id(col_blue));
+            it.draw_pixel_at(px+3, py-3, id(col_blue));
+            it.draw_pixel_at(px+4, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px+5, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px+6, py-3, id(col_mario_skin2));
+
+            // ----- Shirt6 leg1 Overalls (Blue) -----
+            it.draw_pixel_at(px-5, py-2, id(col_mario_skin2));
+            it.draw_pixel_at(px-4, py-2, id(col_mario_skin2));
+            it.draw_pixel_at(px-3, py-2, id(col_blue));
+            it.draw_pixel_at(px-2, py-2, id(col_blue));
+            it.draw_pixel_at(px-1, py-2, id(col_blue));
+            it.draw_pixel_at(px, py-2, id(col_blue));
+            it.draw_pixel_at(px+1, py-2, id(col_blue));
+            it.draw_pixel_at(px+2, py-2, id(col_blue));
+            it.draw_pixel_at(px+3, py-2, id(col_blue));
+            it.draw_pixel_at(px+4, py-2, id(col_blue));
+            it.draw_pixel_at(px+5, py-2, id(col_mario_skin2));
+            it.draw_pixel_at(px+6, py-2, id(col_mario_skin2));
+
+            // ----- Shirt7 leg2 Overalls (Blue) -----
+            it.draw_pixel_at(px-3, py-1, id(col_blue));
+            it.draw_pixel_at(px-2, py-1, id(col_blue));
+            it.draw_pixel_at(px-1, py-1, id(col_blue));
+            it.draw_pixel_at(px+2, py-1, id(col_blue));
+            it.draw_pixel_at(px+3, py-1, id(col_blue));
+            it.draw_pixel_at(px+4, py-1, id(col_blue));
+
+            // ----- Shoes1 (Brown) -----
+            it.draw_pixel_at(px-4, py, id(col_brown));
+            it.draw_pixel_at(px-3, py, id(col_brown));
+            it.draw_pixel_at(px-2, py, id(col_brown));
+            it.draw_pixel_at(px+3, py, id(col_brown));
+            it.draw_pixel_at(px+4, py, id(col_brown));
+            it.draw_pixel_at(px+5, py, id(col_brown));
+            // ----- Shoes2 (Brown) -----
+            it.draw_pixel_at(px-5, py+1, id(col_brown));
+            it.draw_pixel_at(px-4, py+1, id(col_brown));
+            it.draw_pixel_at(px-3, py+1, id(col_brown));
+            it.draw_pixel_at(px-2, py+1, id(col_brown));
+
+            it.draw_pixel_at(px+3, py+1, id(col_brown));
+            it.draw_pixel_at(px+4, py+1, id(col_brown));
+            it.draw_pixel_at(px+5, py+1, id(col_brown));
+            it.draw_pixel_at(px+6, py+1, id(col_brown));
+            
+            // Voice assistant status
+            id(draw_display).execute();    
+      - id: minecraft_page
+        lambda: |-
+          const int W = 64;
+          const int H = 32;
+          const int BORDER = 3;
+          const int GRASS_H = 2;
+          it.fill(Color(0, 0, 0));
+
+          // ===== DIRT BORDER =====
+          for (int x = 0; x < W; x++) {
+              for (int y = 0; y < H; y++) {
+                  bool border =
+                      x < BORDER || x >= W - BORDER ||
+                      y < BORDER || y >= H - BORDER;
+
+                  if (border) {
+                      Color c = id(mc_dirt);
+
+                      int n = (x * 11 + y * 7) % 10;
+                      if (n < 3)      c = id(mc_dirt_dark);
+                      else if (n > 7) c = id(mc_dirt_light);
+
+                      it.draw_pixel_at(x, y, c);
+                  }
+              }
+          }
+          //draw some broken walls
+          it.draw_pixel_at(61, 26, id(col_white));
+          it.draw_pixel_at(61, 27, id(col_white));
+          it.draw_pixel_at(62, 19, id(col_white));
+          it.draw_pixel_at(62, 20, id(col_white));
+          it.draw_pixel_at(62, 21, id(col_white));
+          it.draw_pixel_at(62, 22, id(col_white));
+          it.draw_pixel_at(62, 23, id(col_white));
+          it.draw_pixel_at(62, 24, id(col_white));
+          it.draw_pixel_at(62, 25, id(col_white));
+          
+          it.draw_pixel_at(63, 20, id(col_white));
+          it.draw_pixel_at(63, 21, id(col_white));
+          it.draw_pixel_at(63, 22, id(col_white));
+          it.draw_pixel_at(63, 23, id(col_white));
+          it.draw_pixel_at(63, 24, id(col_white));
+          it.draw_pixel_at(63, 25, id(col_white));
+          it.draw_pixel_at(63, 26, id(col_white));
+          it.draw_pixel_at(63, 27, id(col_white));
+          
+          it.draw_pixel_at(61, 20, id(col_white));
+          it.draw_pixel_at(61, 21, id(col_white));
+          it.draw_pixel_at(61, 22, id(col_white));
+          it.draw_pixel_at(61, 23, id(col_white));
+          it.draw_pixel_at(61, 24, id(col_white));
+          it.draw_pixel_at(61, 25, id(col_white));
+          it.draw_pixel_at(61, 26, id(col_white));
+          it.draw_pixel_at(61, 27, id(col_white));
+          it.draw_pixel_at(60, 27, id(mc_dirt_dark));
+          // ===== GRASS STRIP =====
+          for (int x = BORDER; x < W - BORDER; x++) {
+              for (int y = BORDER; y < BORDER + GRASS_H; y++) {
+                  Color g = ((x + y) % 3 == 0)
+                            ? id(mc_grass_dark)
+                            : id(mc_grass);
+                  it.draw_pixel_at(x, y, g);
+              }
+          }
+
+          // ===== INNER Black PANEL =====
+          it.filled_rectangle(
+              BORDER + 1,
+              BORDER + GRASS_H + 1,
+              W - (BORDER * 2) - 2,
+              H - (BORDER * 2) - GRASS_H - 2,
+              id(mc_white)
+          );
+            //=== Clock Panel
+            int box_x = 16;
+            int box_y = 6;
+            int box_w = 34;
+            int box_h = 14;
+            it.filled_rectangle(box_x, box_y - 2, box_w, box_h, id(col_black));
+
+          //  ===== MINECRAFT clock =====
+            char time_str[8];
+            auto now = id(sntp_time).now();
+            sprintf(time_str, "%02d:%02d", now.hour, now.minute);    
+            int x1, y1, w, h;
+            it.get_text_bounds(0, 0, time_str, id(TickingTimebomb), TextAlign::TOP_LEFT, &x1, &y1, &w, &h);
+            int tx = box_x -1 + (box_w - w) / 2;
+            int ty = box_y + (box_h - h) / 2 ;
+            //it.filled_rectangle(box_x+1, box_y+1, box_w-2, box_h-2, id(col_black));
+                
+            it.print(tx, ty-3, id(TickingTimebomb), id(col_gold), time_str);
+
+          // ===== DATE BELOW time =====
+          const char *months[] = {
+            "${jan}", "${feb}", "${mar}", "${apr}", "${may}",
+            "${jun}", "${jul}", "${aug}", "${sept}",
+            "${oct}", "${nov}", "${dec}"
+          };
+
+          it.printf(
+            box_x + box_w / 2,
+            23,
+            id(font_date),
+            id(col_black),
+            TextAlign::CENTER,
+            "%d %s",
+            now.day_of_month,
+            months[now.month - 1]
+          );
+
+          // ===== MINECRAFT STEVE =====
+            const int STEVE_X = BORDER - 5;
+            const int STEVE_Y = BORDER + GRASS_H + 2;
+            
+            // S = skin, H = hair, B = shirt, P = pants, W = sword, E = eye
+            
+            const char STEVE[21][21] = {
+              "        BBBBBBBB    ",
+              "    C   BHHHHHHB    ",
+              "   CWC  BHHHHHHB    ",
+              "   CWC  BHSSSSHB    ",
+              "   CWC  BSESSESB    ",
+              "   CWC  BSSSSSSB    ",
+              "   CWC  BSSHHSSB    ",
+              "   CWC  BBBBBBBB    ",
+              "   CWC BCBCCCCBCB   ",
+              " CCCCCCBCBCCCCBCB   ",  
+              "   BBBBSBBCCCCBBSB  ",
+              "   BSSSSBBCCCCBBSB  ",
+              "   BBBBB BCCCCB BSB ",
+              "    D    BBBBBB BSB ",
+              "    C    BPPPPB  BB ",
+              "         BPBBPB     ",
+              "         BPBBPB     ",
+              "         BPBBPB     ",
+              "         BPBBPB     ",
+              "         BPBBPB     ",
+              "         BDBBDB     "
+            };
+            
+            for (int y = 0; y < 21; y++) {
+              for (int x = 0; x < 20; x++) {
+                Color c;
+                bool draw = true;
+            
+                switch (STEVE[y][x]) {
+                  case 'H': c = id(steve_hair); break;
+                  case 'S': c = id(steve_skin); break;
+                  case 'E': c = id(steve_eye); break;
+                  case 'C': c = id(steve_shirt); break;
+                  case 'P': c = id(steve_pants); break;
+                  case 'W': c = id(col_white); break;
+                  case 'D': c = id(steve_sword_dark); break;
+                  case 'B': c = id(col_black); break;
+                  default: draw = false;
+                }
+            
+                if (draw) {
+                  it.draw_pixel_at(
+                    STEVE_X + x,
+                    STEVE_Y + y,
+                    c
+                  );
+                }
+              }
+            }
+            
+          // --- Middle: Weather icon ---
+            std::string weather_stat = id(ha_weather_state).state;
+
+            const char* icon = "\U000F0590";
+            Color icon_color = id(col_white);
+            bool is_rain = false;
+
+            if (weather_stat == "sunny") {
+                icon = "\U000F05A8";
+                icon_color = id(col_gold);
+
+            } else if (weather_stat.find("rain") != std::string::npos) {
+                icon = "\U000F0590";   // cloudy icon for rain
+                icon_color = id(col_white);
+                is_rain = true;
+            } else if (weather_stat == "lightning" || weather_stat == "lightning-rainy") {
+                icon = "\U000F0593";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "windy" || weather_stat == "windy-variant") {
+                icon = "\U000F059D";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "clear-night" || weather_stat == "clearnight") {
+                icon = "\U000F0594";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "cloudy" || weather_stat == "partlycloudy") {
+                icon = "\U000F0590";
+                icon_color = id(col_white);
+            }
+            const int weather_X = BORDER + 30;
+            // draw icon WITH color
+            it.printf(
+                weather_X, 1,
+                id(icon_font_9),
+                icon_color,
+                TextAlign::CENTER,
+                "%s",
+                icon
+            );
+            // 3 Rain drop animation overlay
+            
+            auto draw_rain = [&](int drop_x1, int drop_start_y) {
+                int drop_x2 = drop_x1 + 2;
+                int drop_x3 = drop_x1 + 4;
+
+                uint32_t fall_dur    = 500;
+                uint32_t stagger     = fall_dur * 6 / 10;
+                uint32_t period      = stagger * 3;
+                uint32_t visible     = fall_dur * 4 / 5;
+                uint32_t drop_travel = 4;
+
+                uint32_t t = millis() % period;
+
+                auto draw_drop = [&](int x, uint32_t phase_offset) {
+                    uint32_t lt = (t + period - phase_offset) % period;
+                    if (lt < fall_dur) {
+                        int offset = (int)(lt * drop_travel) / (int)fall_dur;
+                        if (lt < visible) {
+                            it.draw_pixel_at(x, drop_start_y + offset,     id(col_white));
+                            it.draw_pixel_at(x, drop_start_y + offset + 1, id(col_white));
+                        }
+                    }
+                };
+
+                draw_drop(drop_x1, 0);
+                draw_drop(drop_x2, stagger);
+                draw_drop(drop_x3, stagger * 2);
+            };
+            // Draw rain drops
+            draw_rain(31, 4);
+
+          // ===== MINECRAFT Zombie (Animated – stepped) =====
+            const int ZOMBIE_BASE_X = BORDER + 50;
+            const int ZOMBIE_Y      = BORDER + GRASS_H + 13;
+
+            const char ZOMBIE[10][9] = {
+              "   LLGG ",
+              "   BLBL ",
+              "   LWGG ",
+              "GGCCGLLC",
+              "GGCCCGGC",
+              "   CCCC ",
+              "   EECC ",
+              "   EEEE ",
+              "   EEEE ",
+              "   DDDD "
+            };
+
+            int ZOMBIE_X = ZOMBIE_BASE_X + id(zombie_offset);
+            bool facing_left = (id(zombie_dir) < 0);
+
+            // ---- clear zombie movement area ----
+            it.filled_rectangle(
+              ZOMBIE_BASE_X - 4,
+              ZOMBIE_Y,
+              12,
+              10,
+              id(mc_white)
+            );
+
+            // ---- draw zombie ----
+            for (int y = 0; y < 10; y++) {
+              for (int x = 0; x < 8; x++) {
+                int sx = facing_left ? x : (7 - x);
+                Color c;
+                bool draw = true;
+                switch (ZOMBIE[y][sx]) {
+                  case 'E': c = id(steve_eye);        break;
+                  case 'C': c = id(steve_shirt);      break;
+                  case 'D': c = id(steve_sword_dark); break;
+                  case 'B': c = id(col_black);        break;
+                  case 'L': c = id(col_lime);         break;
+                  case 'G': c = id(col_green);        break;
+                  default:  draw = false;
+                }
+                if (draw) {
+                  it.draw_pixel_at(ZOMBIE_X + x, ZOMBIE_Y + y, c);
+                }
+              }
+            }
+          id(draw_display).execute();
+
+      - id: network_page
+        lambda: |-
+          it.fill(Color(0, 0, 0));
+          // Title
+          it.print(it.get_width() / 2, 1, id(font_medium), TextAlign::TOP_CENTER, "W I F I");
+
+          // Horizontal divider
+          it.line(0, 11, it.get_width(), 11);
+          // Fill brown into bottom half of the screen
+          it.filled_rectangle(0, it.get_height()/2 - 3, it.get_width(), it.get_height()/2 + 3, id(col_black));
+          // IP Address from wifi_info text sensor
+          it.print(1, 12, id(font_medium), "IP:");
+          if (id(device_ip).has_state()) {
+            it.print(31, 26, id(font_medium), TextAlign::CENTER, id(device_ip).state.c_str());
+
+          } else {
+            it.print(31, 26, id(font_medium), TextAlign::CENTER, "...");
+          }
+          id(draw_display).execute();
+
+font:
+  - file:
+      type: gfonts
+      family: ${font_family_clock}
+      weight: 500
+    id: TickingTimebomb
+    size: 13
+  - file:
+      type: gfonts
+      family: ${font_family_clock}
+      weight: 500
+    id: font_date
+    size: 9
+  - file:
+      type: gfonts
+      family: ${font_family_clock}
+      weight: 500
+    id: font_medium
+    size: 9
+  - file:
+      type: gfonts
+      family: ${font_family_clock}
+      weight: 500
+    id: font_small
+    size: 7
+  - file: "https://github.com/chickymonkey/esphome/raw/refs/heads/main/font/materialdesignicons-webfont.ttf"
+    id: icon_font_9
+    size: 9
+    glyphs: &icon_glyphs
+      - "\U000F009E"#bell
+      - "\U000F0150"#clock
+      - "\U000F0493"#settings cog
+      - "\U000F04AD"#next track
+      - "\U000F04AE"#previous track
+      - "\U000F04B9"#living room
+      - "\U000F04DB"#stop
+      - "\U000F0502"#screen settings
+      - "\U000F050F"#temp sensor
+      - "\U000F0521"#toggle on
+      - "\U000F05CB"#voice
+      - "\U000F068A"#alarm home
+      - "\U000F06E8"#light bulb illuminated
+      - "\U000F075A"#music
+      - "\U000F075D"#vol plus
+      - "\U000F075E"#vol minus
+      - "\U000F07D0"#api connected
+      - "\U000F07F4"#tv
+      - "\U000F087B"#api disconnected
+      - "\U000F08D6"#settings
+      - "\U000F099D"#alarm away
+      - "\U000F099E"#disarmed
+      - "\U000F0A19"#toggle off
+      - "\U000F0B26"#down
+      - "\U000F0B28"#left
+      - "\U000F0B2A"#right
+      - "\U000F0B2C"#up
+      - "\U000F0B6C"#car battery
+      - "\U000F0D90"#screen off
+      - "\U000F0EBA"#stats
+      - "\U000F0ED4"#voice off
+      - "\U000F0FCE"#scene
+      - "\U000F10CD"#battery warning
+      - "\U000F1322"#tools
+      - "\U000F16BC"#wifidisconnected
+      - "\U000F16BD"#wifi connected
+      - "\U000F1C3B"#battery charging/usb powered
+      - "\U000F1C6F"#info
+      - "\U000F0590" #cloudy
+      - "\U000F0596" #rainy
+      - "\U000F05A8" #sunny
+      - "\U000F0593" #storm
+      - "\U000F059D" #windy
+      - "\U000F0594" #clear night
+  - file:
+      type: gfonts
+      family: ${font_family_clock}
+      weight: 600
+    id: font_timer
+    size: 12
+    glyphs: "APMC0123456789°:- "
+web_server:
+  port: 80
+time:
+  - platform: homeassistant
+    id: ha_time
+  - platform: sntp
+    id: sntp_time
+    timezone: "Australia/Melbourne"
+    on_time:
+      - seconds: 0
+        then:
+          - script.execute: update_clock
+          - lambda: |-
+              bool day = id(sunstate).is_above_horizon();
+              if (!day) {
+                //set the brightness to screen
+                id(matrix_display).set_brightness(15);
+                //set the brightness to number value
+                auto call = id(led_brightness).make_call();
+                call.set_value(15);
+                call.perform();
+              } else if (day) {
+                id(matrix_display).set_brightness(35);
+                auto call = id(led_brightness).make_call();
+                call.set_value(35);
+                call.perform();
+              }
+        
+sun:
+  id: sunstate
+  latitude: -37.8162°
+  longitude: 144.9640°
+
+sensor:
+  - platform: sun
+    name: Sun Elevation
+    type: elevation
+    update_interval: 600s
+  - platform: sun
+    name: Sun Azimuth
+    type: azimuth
+    update_interval: 600s
+
+  - platform: shtcx
+    temperature:
+      name: "Study Temperature"
+      id: study_temp
+      filters:
+        - offset: -11
+
+    humidity:
+      name: "Study Humidity"
+      id: study_humidity
+      filters:
+        - offset: 15
+    update_interval: 20s
+    i2c_id: i2c_adc_dac
+
+  - platform: template
+    name: "Accel Z"
+    id: accel_z
+    unit_of_measurement: "g"
+    accuracy_decimals: 2
+    update_interval: 200ms
+    lambda: |-
+      uint8_t reg = 0x39;   // Accel Z LSB
+      uint8_t data[2];
+
+      if (id(i2c_adc_dac)->write_readv(0x6B, &reg, 1, data, 2) != i2c::ERROR_OK)
+        return NAN;
+
+      int16_t raw = (int16_t)((data[1] << 8) | data[0]);
+
+      // ±2g scale
+      return raw / 16384.0;
+
+text_sensor:
+  - platform: homeassistant
+    id: ha_weather_state
+    entity_id: weather.berwick
+
+  - platform: wifi_info
+    ip_address:
+      name: Device IP Address
+      id: device_ip
+      on_value:
+        then:
+          - component.update: matrix_display
+    ssid:
+      id: wifi_ssid
+      name: "WiFi SSID"
+
+select:
+  - platform: template
+    name: "Matrix Display Page"
+    id: display_page
+    restore_value: True
+    options:
+      - "Mario"
+      - "Minecraft"
+      - "Network"
+    initial_option: "Mario"
+    optimistic: true
+    set_action:
+      - lambda: |-
+          if (x == "Mario") {
+            id(page_no) = 1;
+            id(matrix_display).show_page(id(mario_page));
+            id(mario_anim_state) = 0;
+            id(mario_anim_tick)  = 0;
+            id(mario_y)          = id(mario_base_y);
+          } else if (x == "Minecraft") {
+            id(page_no) = 2;
+            id(matrix_display).show_page(id(minecraft_page));
+          } else if (x == "Network") {
+            id(page_no) = 3;
+            id(matrix_display).show_page(id(network_page));
+          }
+      - component.update: matrix_display
+
+  - platform: template
+    entity_category: config
+    name: Wake word engine location
+    id: wake_word_engine_location
+    icon: "mdi:account-voice"
+    optimistic: true
+    restore_value: true
+    options:
+      - In Home Assistant
+      - On device
+    initial_option: On device
+    on_value:
+      - if:
+          condition:
+            lambda: return !id(init_in_progress);
+          then:
+            - wait_until:
+                lambda: return id(voice_assistant_phase) == ${voice_assist_muted_phase_id} || id(voice_assistant_phase) == ${voice_assist_idle_phase_id};
+            - if:
+                condition:
+                  lambda: return x == "In Home Assistant";
+                then:
+                  - micro_wake_word.stop
+                  - delay: 500ms
+                  - if:
+                      condition:
+                        switch.is_off: mute
+                      then:
+                        - lambda: id(va).set_use_wake_word(true);
+                        - voice_assistant.start_continuous:
+            - if:
+                condition:
+                  lambda: return x == "On device";
+                then:
+                  - lambda: id(va).set_use_wake_word(false);
+                  - voice_assistant.stop
+                  - delay: 500ms
+                  - if:
+                      condition:
+                        switch.is_off: mute
+                      then:
+                        - micro_wake_word.start
+color:
+  - id: active_timer_color
+    hex: "26ed3a"
+  - id: paused_timer_color
+    hex: "3b89e3"
+
+##Weather API reading
+
+#http_request:
+#  verify_ssl: False
+#  timeout: 10s
+#  buffer_size_rx: 1024
+#  buffer_size_tx: 1024
