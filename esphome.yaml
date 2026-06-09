@@ -57,6 +57,8 @@ esphome:
       then:
         - script.execute: select_display_page
         - component.update: matrix_display
+        - lambda: |-
+             id(matrix_display).set_brightness(35);
         - lambda: |- # gyroscope
             ESP_LOGI("QMI8658", "Initializing...");
 
@@ -115,7 +117,7 @@ psram:
 # Enable logging
 logger:
   level: DEBUG
-
+    
 wifi:
   id: wifi_component
   ssid: !secret wifi_ssid
@@ -221,14 +223,10 @@ globals:
     type: Color
     initial_value: 'Color(0, 144, 90)'
 
-  - id: col_grey
-    type: Color
-    initial_value: 'Color(120,120,120)'
-
   - id: col_ground_fill
     type: Color
-    initial_value: 'Color(55, 21, 11)'
-
+    initial_value: 'Color(49, 21, 11)'
+    
   - id: col_mario_skin2
     type: Color
     initial_value: 'Color(220, 190, 150)'
@@ -274,10 +272,6 @@ globals:
   - id: mc_grass_dark
     type: Color
     initial_value: 'Color(65, 125, 30)'
-
-  - id: mc_white
-    type: Color
-    initial_value: 'Color(255, 255, 255)'
 
   # Steve
   - id: steve_hair
@@ -362,6 +356,7 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
+
 button:
   - platform: restart
     id: reboot_btn
@@ -470,12 +465,13 @@ interval:
 
           id(matrix_display).update();
 
-  - interval: 800ms
+  - interval: 600ms
     id: rotation_reaction
     then:
       - lambda: |-
           static bool laid = false;
           float x = id(accel_z).state;
+          int current_page = id(page_no);
           if (isnan(x)) return;
           if (!laid && x < -0.65) {
             id(screen_laid) = true;
@@ -492,14 +488,24 @@ interval:
             id(screen_laid) = false;
             laid = false;
             ESP_LOGI("ROTATE", "=== Screen is up ===");
-            id(matrix_display).show_page(id(mario_page));
             id(mario_anim_state) = 0;
             id(mario_anim_tick)  = 0;
             id(mario_y)          = id(mario_base_y);
+            
+            if (current_page == 1) {
+              id(matrix_display).show_page(id(mario_page));
+            }
+            else if (current_page == 2) {
+              id(matrix_display).show_page(id(minecraft_page));
+            }
+            else if (current_page == 3) {
+              id(matrix_display).show_page(id(network_page));
+            }
+
             id(matrix_display).set_brightness(15);
             id(matrix_display).update();
           }
-  - interval: 80ms
+  - interval: 100ms
     then:
       - lambda: |
           if (!id(global_is_timer_active) && !id(global_is_timer)) {
@@ -613,6 +619,8 @@ media_player:
 
 micro_wake_word:
   id: mww
+  stop_after_detection: false
+  vad:
   models:
     - hey_jarvis
   on_wake_word_detected:
@@ -624,9 +632,9 @@ voice_assistant:
   microphone: box_mic
   media_player: speaker_media_player
   micro_wake_word: mww
-  noise_suppression_level: 0
+  noise_suppression_level: 2
   auto_gain: 31dBFS
-  volume_multiplier: 3.0
+  volume_multiplier: 4.0
   on_listening:
     - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
     - script.execute: draw_display
@@ -792,21 +800,33 @@ script:
               color2 = id(col_black);
               break;
           }
-          //Ground Row 29 always solid
-          for (int x = 0; x < width; x++) {
-            id(matrix_display).draw_pixel_at(x, 29, id(col_ground_fill));
-          }
-          //Row 30 and 31 in either static or marquee
-          if (skip_marquee) {
-            // Draw brick strip only, no marquee
-            const int brick_y = 30;
-            const int width   = 64;
+          //In mario page - Ground Row 29 always solid
+          if ( id(page_no) == 1){
             
-            for (int row = 0; row < 2; row++) {
-              for (int x = 0; x < width; x++) {
-                Color c = (x % 6 == 0) ? id(col_black) : id(col_ground_fill);
-                id(matrix_display).draw_pixel_at(x, brick_y + row, c);
+            for (int x = 0; x < width; x++) {
+              id(matrix_display).draw_pixel_at(x, 29, id(col_ground_fill));
+            }
+            //Row 30 and 31 in either static or marquee
+            if (skip_marquee) {
+              // Draw brick strip only, no marquee
+              const int brick_y = 30;
+              const int width   = 64;
+            
+              for (int row = 0; row < 2; row++) {
+                for (int x = 0; x < width; x++) {
+                  Color c = (x % 6 == 0) ? id(col_black) : id(col_ground_fill);
+                  id(matrix_display).draw_pixel_at(x, brick_y + row, c);
+                }
               }
+              return;
+            }
+          }
+          
+          // Minecraft page - solid dirt strip when idle
+          if (id(page_no) == 2 && skip_marquee) {
+            for (int x = 0; x < width; x++) {
+              id(matrix_display).draw_pixel_at(x, strip_y,     id(mc_dirt_dark));
+              id(matrix_display).draw_pixel_at(x, strip_y + 1, id(mc_dirt_dark));
             }
             return;
           }
@@ -1523,9 +1543,8 @@ display:
             it.draw_pixel_at(px+4, py+1, id(col_brown));
             it.draw_pixel_at(px+5, py+1, id(col_brown));
             it.draw_pixel_at(px+6, py+1, id(col_brown));
-            
-            // Voice assistant status
-            id(draw_display).execute();    
+          // Voice assistant status
+            id(draw_display).execute();
       - id: minecraft_page
         lambda: |-
           const int W = 64;
@@ -1543,11 +1562,9 @@ display:
 
                   if (border) {
                       Color c = id(mc_dirt);
-
                       int n = (x * 11 + y * 7) % 10;
                       if (n < 3)      c = id(mc_dirt_dark);
                       else if (n > 7) c = id(mc_dirt_light);
-
                       it.draw_pixel_at(x, y, c);
                   }
               }
@@ -1597,7 +1614,7 @@ display:
               BORDER + GRASS_H + 1,
               W - (BORDER * 2) - 2,
               H - (BORDER * 2) - GRASS_H - 2,
-              id(mc_white)
+              id(col_white)
           );
             //=== Clock Panel
             int box_x = 16;
@@ -1764,8 +1781,9 @@ display:
                 draw_drop(drop_x3, stagger * 2);
             };
             // Draw rain drops
-            draw_rain(31, 4);
-
+            if (is_rain){
+              draw_rain(31, 4);
+            }
           // ===== MINECRAFT Zombie (Animated – stepped) =====
             const int ZOMBIE_BASE_X = BORDER + 50;
             const int ZOMBIE_Y      = BORDER + GRASS_H + 13;
@@ -1792,7 +1810,7 @@ display:
               ZOMBIE_Y,
               12,
               10,
-              id(mc_white)
+              id(col_white)
             );
 
             // ---- draw zombie ----
@@ -1835,7 +1853,6 @@ display:
           } else {
             it.print(31, 26, id(font_medium), TextAlign::CENTER, "...");
           }
-          id(draw_display).execute();
 
 font:
   - file:
@@ -2084,11 +2101,3 @@ color:
     hex: "26ed3a"
   - id: paused_timer_color
     hex: "3b89e3"
-
-##Weather API reading
-
-#http_request:
-#  verify_ssl: False
-#  timeout: 10s
-#  buffer_size_rx: 1024
-#  buffer_size_tx: 1024
