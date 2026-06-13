@@ -8,13 +8,6 @@
 substitutions:
   font_family_clock: Roboto
   font_glyphsets: "GF_Latin_Core"
-  monday: Mon
-  tuesday: Tue
-  wednesday: Wed
-  thursday: Thu
-  friday: Fri
-  saturday: Sat
-  sunday: Sun
 
   jan: Jan
   feb: Feb
@@ -31,15 +24,12 @@ substitutions:
   #brightness 
   day_brightness: 35
   night_brightness: 15
-  latenight_brightness: 5
   
   #voice assistant
-  loading_illustration_background_color: "000000"
-  idle_illustration_background_color: "000000"
-  listening_illustration_background_color: "FFFFFF"
-  thinking_illustration_background_color: "FFFFFF"
-  replying_illustration_background_color: "FFFFFF"
-  error_illustration_background_color: "000000"
+  #listening_illustration_background_color: "FFFFFF"
+  #thinking_illustration_background_color: "FFFFFF"
+  #replying_illustration_background_color: "FFFFFF"
+  #error_illustration_background_color: "000000"
 
   voice_assist_idle_phase_id: "1"
   voice_assist_listening_phase_id: "2"
@@ -49,16 +39,27 @@ substitutions:
   voice_assist_error_phase_id: "11"
   voice_assist_muted_phase_id: "12"
   voice_assist_timer_finished_phase_id: "20"
+
+  speaker_in_ma: media_player.study_room_speaker
 esphome:
   name: matrix-clock
   friendly_name: Matrix Clock
+  min_version: 2026.5.0  # esphome-intercom 2026.6.x requires ESPHome 2026.5.x or newer
   on_boot:
     - priority: -100
       then:
         - script.execute: select_display_page
         - component.update: matrix_display
         - lambda: |-
-             id(matrix_display).set_brightness(35);
+            if (id(matrix_backlight).current_values.is_on()) {
+              if (id(matrix_backlight).current_values.is_on()) {
+                int brightness = id(sunstate).is_above_horizon() 
+                  ? ${day_brightness} 
+                  : ${night_brightness};
+                id(matrix_display).set_brightness(brightness);
+              }
+            }
+              
         - lambda: |- # gyroscope
             ESP_LOGI("QMI8658", "Initializing...");
 
@@ -114,10 +115,18 @@ psram:
   mode: octal
   speed: 80MHz
 
-# Enable logging
 logger:
   level: DEBUG
     
+api:
+#  encryption:
+#    key: "dcww9b3QKtjPfz6V3rtv1DU07cjnUkTCdRzg3o3seVY="
+ota:
+  - platform: esphome
+    password: "ffdc6ab165f21c0061c0d10898d8d0ee"
+    on_begin: # prevent  flickering during OTA
+      - lambda: 
+          id(matrix_display).set_brightness(0);
 wifi:
   id: wifi_component
   ssid: !secret wifi_ssid
@@ -320,7 +329,15 @@ globals:
     type: bool
     restore_value: 'True'
     initial_value: 'false'
+  - id: screen_faced_down
+    type: bool
+    restore_value: 'True'
+    initial_value: 'false'
 
+  - id: side_lifted
+    type: bool
+    restore_value: 'True'
+    initial_value: 'false'
   #Voice assistant
   - id: init_in_progress
     type: bool
@@ -356,7 +373,22 @@ globals:
     type: int
     restore_value: no
     initial_value: '0'
+  # screen oritation control
+  - id: speaker_was_playing
+    type: bool
+    restore_value: no
+    initial_value: 'false'
 
+  - id: privacy_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: speaker_volume_target
+    type: float
+    restore_value: yes
+    initial_value: '0.50'
+  
 button:
   - platform: restart
     id: reboot_btn
@@ -373,26 +405,27 @@ number:
     initial_value: ${day_brightness}
     set_action:
       - lambda: |-
-          id(matrix_display).set_brightness(x);
+          if (id(matrix_backlight).current_values.is_on()) {
+            id(matrix_display).set_brightness(x);
+          }
 interval:
   - interval: 1400ms
     id: twinkle_stars
     then:
       - lambda: |-
           bool day = id(sunstate).is_above_horizon();
-          if (id(screen_laid)) return;
-          if (id(page_no) != 1) return;
-          if (day) return;
+          if (id(screen_laid) || id(screen_faced_down) || id(side_lifted) || id(page_no) != 1 || day) return;
+
           if (!day) {
             // Night star twinkle
             id(twinkle_index) = (id(twinkle_index) + 1) % 2;
           }
           //Show page based on selection
-          if (id(display_page).state == "Mario")  {
-            id(matrix_display).show_page(id(mario_page));
-          } else if (id(display_page).state == "Minecraft")  {
-            id(matrix_display).show_page(id(minecraft_page));
-          }
+          //if (id(display_page).state == "Mario")  {
+          //  id(matrix_display).show_page(id(mario_page));
+          //} else if (id(display_page).state == "Minecraft")  {
+          //  id(matrix_display).show_page(id(minecraft_page));
+          //}
           id(matrix_display).update();
   
   - interval: 200ms
@@ -465,27 +498,66 @@ interval:
 
           id(matrix_display).update();
 
-  - interval: 600ms
+  - interval: 500ms
     id: rotation_reaction
     then:
       - lambda: |-
           static bool laid = false;
+          static bool faced_down = false;
+          static bool volume_adjusting = false;
           float x = id(accel_z).state;
+          float y = id(accel_y).state;
           int current_page = id(page_no);
-          if (isnan(x)) return;
+
+          if (isnan(x) || isnan(y)) return;
+
+          // Volume control by Y tilt
+          if (y > 0.21) {
+            id(side_lifted) = true;
+            volume_adjusting = true;
+            id(matrix_display).show_page(id(volume_page));
+            id(speaker_volume_up).execute();
+            id(matrix_display).update();
+          } else if (y < -0.21) {
+            id(side_lifted) = true;
+            volume_adjusting = true;
+            id(matrix_display).show_page(id(volume_page));
+            id(speaker_volume_down).execute();
+            id(matrix_display).update();
+          } else if (volume_adjusting && y < 0.07 && y > -0.07) {
+            id(side_lifted) = false;
+            volume_adjusting = false;
+
+            if (current_page == 1) {
+              id(matrix_display).show_page(id(mario_page));
+            } else if (current_page == 2) {
+              id(matrix_display).show_page(id(minecraft_page));
+            } else if (current_page == 3) {
+              id(matrix_display).show_page(id(network_page));
+            }
+          
+            id(matrix_display).update();
+          }
+          
+          //Screen is laid facing up.
+          //if (isnan(x)) return;
           if (!laid && x < -0.65) {
             id(screen_laid) = true;
             laid = true;
-
-            ESP_LOGI("ROTATE", "=== Screen is laid down ===");
+            
+            ESP_LOGI("ROTATE", "=== Screen is down ===");
             id(matrix_display).show_page(id(network_page));
-            id(matrix_display).set_brightness(15);
+            // Turn on backlight
+            auto call = id(matrix_backlight).turn_on();
+            call.perform();
             id(matrix_display).update();
           }
 
           // Back to standing screen
-          else if (laid && x < 0.13 && x > -0.65) {
+          if ((laid || faced_down) && x < 0.13 && x > -0.65) {
             id(screen_laid) = false;
+            id(screen_faced_down) = false;
+            faced_down = false;
             laid = false;
             ESP_LOGI("ROTATE", "=== Screen is up ===");
             id(mario_anim_state) = 0;
@@ -501,17 +573,52 @@ interval:
             else if (current_page == 3) {
               id(matrix_display).show_page(id(network_page));
             }
-
-            id(matrix_display).set_brightness(15);
+            // Turn on backlight
+            auto call = id(matrix_backlight).turn_on();
+            call.perform();
+            id(exit_privacy_mode).execute();
             id(matrix_display).update();
+          } 
+
+          //privacy mode - faced down
+          if (!faced_down && x > 0.7) {
+            id(screen_faced_down) = true;
+            faced_down = true;
+            ESP_LOGI("ROTATE", "=== Screen is facing down ===");
+            
+            id(enter_privacy_mode).execute();
+            id(matrix_display).update();
+            return;
           }
+
   - interval: 100ms
     then:
       - lambda: |
           if (!id(global_is_timer_active) && !id(global_is_timer)) {
-            id(marquee_offset) = (id(marquee_offset) + 1) % 64;
+            if (id(page_no) == 1 || id(page_no) == 2) {  // only tick on content pages
+              id(marquee_offset) = (id(marquee_offset) + 1) % 64;
+            }
           }
           id(matrix_display).update();
+output:
+  - platform: gpio
+    pin: GPIO11
+    id: pa_ctrl
+    # Output that bridges the light entity to the display
+
+  - platform: template
+    id: matrix_brightness_output
+    type: float
+    write_action:
+      - lambda: |-
+          if (state == 0) {
+            id(matrix_display).set_brightness(0);
+          } else {
+            int brightness = id(sunstate).is_above_horizon() 
+              ? ${day_brightness} 
+              : ${night_brightness};
+            id(matrix_display).set_brightness(brightness);
+          }
 i2c:
   - id: i2c_adc_dac
     #this is shared by SHTC3, QMI8658, and RTC
@@ -549,10 +656,8 @@ microphone:
     adc_type: external
     sample_rate: 16000
     bits_per_sample: 16bit
-output:
-  - platform: gpio
-    pin: GPIO11
-    id: pa_ctrl
+
+
 speaker:
   - platform: i2s_audio
     id: box_speaker
@@ -914,7 +1019,6 @@ script:
             }
           }
 
-
   # Starts either mWW or the streaming wake word, depending on the configured location
   - id: start_wake_word
     then:
@@ -960,6 +1064,92 @@ script:
             - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
           else:
             - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+  - id: enter_privacy_mode
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(privacy_mode);'
+          then:
+            - lambda: |-
+                id(privacy_mode) = true;
+                id(speaker_was_playing) = id(study_room_speaker_state).state == "playing";
+            - homeassistant.service:
+                service: media_player.volume_mute
+                data:
+                  entity_id: ${speaker_in_ma}
+                  is_volume_muted: "true"
+
+            - if:
+                condition:
+                  lambda: |-
+                    return id(speaker_was_playing);
+                then:
+                  - homeassistant.service:
+                      service: media_player.media_pause
+                      data:
+                        entity_id: ${speaker_in_ma}
+
+            - lambda: |-
+                auto call = id(matrix_backlight).turn_off();
+                call.perform();
+
+  - id: exit_privacy_mode
+    then:
+      - if:
+          condition:
+            lambda: 'return id(privacy_mode);'
+          then:
+            - lambda: |-
+                id(privacy_mode) = false;
+
+            - homeassistant.service:
+                service: media_player.volume_mute
+                data:
+                  entity_id: ${speaker_in_ma}
+                  is_volume_muted: "false"
+
+            - if:
+                condition:
+                  lambda: 'return id(speaker_was_playing);'
+                then:
+                  - homeassistant.service:
+                      service: media_player.media_play
+                      data:
+                        entity_id: ${speaker_in_ma}
+
+                  - lambda: |-
+                      id(speaker_was_playing) = false;
+
+            - lambda: |-
+                auto call = id(matrix_backlight).turn_on();
+                call.perform();
+  
+
+  - id: speaker_volume_up
+    mode: restart
+    then:
+      - lambda: |-
+          id(speaker_volume_target) += 0.03;
+          if (id(speaker_volume_target) > 1.0) {
+            id(speaker_volume_target) = 1.0;
+          }
+
+          auto call = id(speaker_media_player).make_call();
+          call.set_volume(id(speaker_volume_target));
+          call.perform();
+
+  - id: speaker_volume_down
+    mode: restart
+    then:
+      - lambda: |-
+          id(speaker_volume_target) -= 0.03;
+          if (id(speaker_volume_target) < 0.0) {
+            id(speaker_volume_target) = 0.0;
+          }
+
+          auto call = id(speaker_media_player).make_call();
+          call.set_volume(id(speaker_volume_target));
+          call.perform();
 
 switch:
   - platform: template
@@ -979,6 +1169,7 @@ switch:
       - script.execute: draw_display
 
   - platform: output
+    id: speaker_switch
     name: "Speaker Enable"
     output: pa_ctrl
     restore_mode: ALWAYS_ON
@@ -1040,6 +1231,15 @@ switch:
           data:
             entity_id: media_player.speaker_media_player
             volume_level: !lambda 'return id(local_volume_value);'
+
+# Light entity exposed to Home Assistant
+light:
+  - platform: monochromatic
+    name: "Matrix Display Backlight"
+    id: matrix_backlight
+    output: matrix_brightness_output
+    default_transition_length: 0s
+    restore_mode: RESTORE_DEFAULT_ON
 
 display:
   - platform: hub75
@@ -1545,6 +1745,7 @@ display:
             it.draw_pixel_at(px+6, py+1, id(col_brown));
           // Voice assistant status
             id(draw_display).execute();
+          
       - id: minecraft_page
         lambda: |-
           const int W = 64;
@@ -1658,7 +1859,6 @@ display:
             const int STEVE_Y = BORDER + GRASS_H + 2;
             
             // S = skin, H = hair, B = shirt, P = pants, W = sword, E = eye
-            
             const char STEVE[21][21] = {
               "        BBBBBBBB    ",
               "    C   BHHHHHHB    ",
@@ -1853,6 +2053,11 @@ display:
           } else {
             it.print(31, 26, id(font_medium), TextAlign::CENTER, "...");
           }
+      - id: volume_page
+        lambda: |-
+          int volume_percent = round(id(speaker_volume_target) * 100);
+          it.printf(13, 12, id(icon_font_13), id(col_white), "\U000F057E");
+          it.printf(24, 10, id(TickingTimebomb), id(col_white), " : %d%%", volume_percent);
 
 font:
   - file:
@@ -1897,10 +2102,10 @@ font:
       - "\U000F068A"#alarm home
       - "\U000F06E8"#light bulb illuminated
       - "\U000F075A"#music
+      - "\U000F057E"#Vol high
       - "\U000F075D"#vol plus
       - "\U000F075E"#vol minus
       - "\U000F07D0"#api connected
-      - "\U000F07F4"#tv
       - "\U000F087B"#api disconnected
       - "\U000F08D6"#settings
       - "\U000F099D"#alarm away
@@ -1927,41 +2132,61 @@ font:
       - "\U000F0593" #storm
       - "\U000F059D" #windy
       - "\U000F0594" #clear night
-  - file:
-      type: gfonts
-      family: ${font_family_clock}
-      weight: 600
-    id: font_timer
-    size: 12
-    glyphs: "APMC0123456789°:- "
+  - file: "https://github.com/chickymonkey/esphome/raw/refs/heads/main/font/materialdesignicons-webfont.ttf"
+    id: icon_font_13
+    size: 13
+    glyphs: &icon_glyphs_13
+      - "\U000F009E"#bell
+      - "\U000F0150"#clock
+      - "\U000F0493"#settings cog
+      - "\U000F04AD"#next track
+      - "\U000F04AE"#previous track
+      - "\U000F04B9"#living room
+      - "\U000F04DB"#stop
+      - "\U000F0502"#screen settings
+      - "\U000F050F"#temp sensor
+      - "\U000F0521"#toggle on
+      - "\U000F05CB"#voice
+      - "\U000F068A"#alarm home
+      - "\U000F06E8"#light bulb illuminated
+      - "\U000F075A"#music
+      - "\U000F057E"#Vol high
+      - "\U000F075D"#vol plus
+      - "\U000F075E"#vol minus
 web_server:
   port: 80
 time:
   - platform: homeassistant
-    id: ha_time
-  - platform: sntp
+#    id: ha_time
+#  - platform: sntp
     id: sntp_time
-    timezone: "Australia/Melbourne"
+#    timezone: "Australia/Melbourne"
     on_time:
       - seconds: 0
         then:
           - script.execute: update_clock
           - lambda: |-
-              bool day = id(sunstate).is_above_horizon();
-              if (!day) {
+              //bool day = id(sunstate).is_above_horizon();
+              //if (!day) {
                 //set the brightness to screen
-                id(matrix_display).set_brightness(15);
+              //  id(matrix_display).set_brightness(15);
                 //set the brightness to number value
-                auto call = id(led_brightness).make_call();
-                call.set_value(15);
-                call.perform();
-              } else if (day) {
-                id(matrix_display).set_brightness(35);
-                auto call = id(led_brightness).make_call();
-                call.set_value(35);
-                call.perform();
+              //  auto call = id(led_brightness).make_call();
+              //  call.set_value(15);
+              //  call.perform();
+              //} else if (day) {
+              //  id(matrix_display).set_brightness(35);
+              //  auto call = id(led_brightness).make_call();
+              //  call.set_value(35);
+              //  call.perform();
+              //}
+              if (id(matrix_backlight).current_values.is_on()) {
+                int brightness = id(sunstate).is_above_horizon() 
+                  ? ${day_brightness} 
+                  : ${night_brightness};
+                id(matrix_display).set_brightness(brightness);
               }
-        
+
 sun:
   id: sunstate
   latitude: -37.8162°
@@ -1971,11 +2196,11 @@ sensor:
   - platform: sun
     name: Sun Elevation
     type: elevation
-    update_interval: 600s
+    update_interval: 300s
   - platform: sun
     name: Sun Azimuth
     type: azimuth
-    update_interval: 600s
+    update_interval: 300s
 
   - platform: shtcx
     temperature:
@@ -1989,15 +2214,51 @@ sensor:
       id: study_humidity
       filters:
         - offset: 15
-    update_interval: 20s
+    update_interval: 120s
     i2c_id: i2c_adc_dac
+
+  - platform: template
+    name: "Accel X"
+    id: accel_x
+    unit_of_measurement: "g"
+    accuracy_decimals: 2
+    update_interval: 5s
+    lambda: |-
+      uint8_t reg = 0x35;   // Accel X LSB
+      uint8_t data[2];
+
+      if (id(i2c_adc_dac)->write_readv(0x6B, &reg, 1, data, 2) != i2c::ERROR_OK)
+        return NAN;
+
+      int16_t raw = (int16_t)((data[1] << 8) | data[0]);
+
+      // ±2g scale
+      return raw / 16384.0;
+
+  - platform: template
+    name: "Accel Y"
+    id: accel_y
+    unit_of_measurement: "g"
+    accuracy_decimals: 2
+    update_interval: 400ms
+    lambda: |-
+      uint8_t reg = 0x37;   // Accel Y LSB
+      uint8_t data[2];
+
+      if (id(i2c_adc_dac)->write_readv(0x6B, &reg, 1, data, 2) != i2c::ERROR_OK)
+        return NAN;
+
+      int16_t raw = (int16_t)((data[1] << 8) | data[0]);
+
+      // ±2g scale
+      return raw / 16384.0;
 
   - platform: template
     name: "Accel Z"
     id: accel_z
     unit_of_measurement: "g"
     accuracy_decimals: 2
-    update_interval: 200ms
+    update_interval: 300ms
     lambda: |-
       uint8_t reg = 0x39;   // Accel Z LSB
       uint8_t data[2];
@@ -2026,6 +2287,9 @@ text_sensor:
       id: wifi_ssid
       name: "WiFi SSID"
 
+  - platform: homeassistant
+    id: study_room_speaker_state
+    entity_id: ${speaker_in_ma}
 select:
   - platform: template
     name: "Matrix Display Page"
@@ -2101,3 +2365,11 @@ color:
     hex: "26ed3a"
   - id: paused_timer_color
     hex: "3b89e3"
+
+##Weather API reading
+
+#http_request:
+#  verify_ssl: False
+#  timeout: 10s
+#  buffer_size_rx: 1024
+#  buffer_size_tx: 1024
