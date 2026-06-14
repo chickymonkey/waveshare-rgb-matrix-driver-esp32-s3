@@ -17,7 +17,6 @@
 #   Music/radio → media_speaker (resampler) ───────────┐
 #                                                      ┼── mixer (48kHz) → hw_speaker → ES8311 DAC
 #   VA TTS      → tts_speaker (resampler) ─────────────┘
-#
 # =============================================================================
 
 ---
@@ -42,11 +41,7 @@ substitutions:
   night_brightness: 15
   
   #voice assistant
-  #listening_illustration_background_color: "FFFFFF"
-  #thinking_illustration_background_color: "FFFFFF"
-  #replying_illustration_background_color: "FFFFFF"
-  #error_illustration_background_color: "000000"
-
+  
   voice_assist_idle_phase_id: "1"
   voice_assist_listening_phase_id: "2"
   voice_assist_thinking_phase_id: "3"
@@ -56,10 +51,11 @@ substitutions:
   voice_assist_muted_phase_id: "12"
   voice_assist_timer_finished_phase_id: "20"
 
-  speaker_in_ma: media_player.study_room_speaker
+  speaker_in_ma: media_player.waveshare_matrix_clock_2
+  
 esphome:
-  name: matrix-clock
-  friendly_name: Matrix Clock
+  name: waveshare-matrix-clock
+  friendly_name: waveshare Matrix Clock
   min_version: 2026.5.0  # esphome-intercom 2026.6.x requires ESPHome 2026.5.x or newer
   on_boot:
     - priority: -100
@@ -107,7 +103,7 @@ esphome:
             ESP_LOGI("QMI8658", "Init complete");
         
         # Speaker Gain on top of the codec's freshly-initialized DAC volume.
-        - script.execute: apply_speaker_gain
+        #- script.execute: apply_speaker_gain
     - priority: 600
       then:
         - delay: 10s
@@ -153,8 +149,8 @@ logger:
   level: DEBUG
     
 api:
-#  encryption:
-#    key: "dcww9b3QKtjPfz6V3rtv1DU07cjnUkTCdRzg3o3seVY="
+  encryption:
+    key: "dcww9b3QKtjPfz6V3rtv1DU07cjnUkTCdRzg3o3seVY="
 ota:
   - platform: esphome
     password: "ffdc6ab165f21c0061c0d10898d8d0ee"
@@ -168,7 +164,11 @@ wifi:
   ap:
     ssid: "Digi-Clock Hotspot"
     password: "wifi12345"
-
+  manual_ip:
+    static_ip: 192.168.3.108
+    gateway: 192.168.3.1
+    subnet: 255.255.255.0
+    dns1: 192.168.3.1
 captive_portal:
 globals:
   - id: page_no
@@ -432,7 +432,7 @@ globals:
     type: int
     restore_value: false
     initial_value: "-1"
-  
+
   - id: user_cancelled
     type: bool
     restore_value: false
@@ -447,6 +447,37 @@ globals:
     restore_value: false
     initial_value: "0"
  
+
+  #duplex settings
+  - id: g_wake_word_enabled
+    type: bool
+    restore_value: true
+    initial_value: "true"
+  - id: g_va_state
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: g_barge_in_pending
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: g_mww_recent
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: g_ducking_active
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: g_applied_led
+    type: int
+    restore_value: false
+    initial_value: "-1"
+  - id: ui_state
+    type: int
+    restore_value: false
+    initial_value: "-1"
+
 button:
   - platform: restart
     id: reboot_btn
@@ -477,6 +508,7 @@ number:
       name: Mic Gain
       min_value: -20
       max_value: 30
+
   - platform: template
     name: Speaker Gain
     id: speaker_gain
@@ -505,12 +537,7 @@ interval:
             // Night star twinkle
             id(twinkle_index) = (id(twinkle_index) + 1) % 2;
           }
-          //Show page based on selection
-          //if (id(display_page).state == "Mario")  {
-          //  id(matrix_display).show_page(id(mario_page));
-          //} else if (id(display_page).state == "Minecraft")  {
-          //  id(matrix_display).show_page(id(minecraft_page));
-          //}
+          
           id(matrix_display).update();
   
   - interval: 200ms
@@ -718,15 +745,17 @@ i2c_device:
     i2c_id: i2c_adc_dac
     address: 0x18
 
-##esp_aec:
+#esp_aec:
 #  id: aec_processor
 #  sample_rate: 16000
-#  filter_length: 8
+#  filter_length: 4
 #  mode: sr_low_cost
 
-# =============================================================================
+# ===============================================================================
 # Audio: AFE + Espressif-backed ESP Audio Stack
-# =============================================================================
+#type + mode	| AEC Engine	           | CPU (Core 0)	| MWW Compatible	|    Use Case
+#sr+low_cost  |	esp_aec3 (linear, SIMD)|   ~23%       |	Yes (10/10)	    | VA + MWW + Intercom
+# ================================================================================
 esp_afe:
   id: afe_processor
   type: fd
@@ -773,15 +802,32 @@ esp_audio_stack:
   i2s_mclk_pin: GPIO12
   i2s_din_pin: GPIO39
   i2s_dout_pin: GPIO21
-  
+  task_core: 0
+  task_priority: 19
+  task_stack_size: 8192
+  buffers_in_psram: true
+  audio_task_stack_in_psram: true
   sample_rate: 48000
   output_sample_rate: 48000
-  slot_bit_width: 16  # 16-bit TDM slots x4
-  bits_per_sample: 16
-  # Do NOT set dma_frame_num here: shrinking the DMA backlog below the auto
-  # sizing (~10 ms/descriptor) causes audible TX underruns on this device.
-  correct_dc_offset: true
   processor_id: afe_processor
+  audio_effects:
+    rate_cvt_complexity: 3
+    rate_cvt_perf_type: speed
+
+  bits_per_sample: 16
+  dma_frame_num: 240
+  gmf_io:
+    reader:
+      io_size: 0
+      buffer_size: 0
+      task_stack_size: 0
+      speed_monitor: false
+    writer:
+      io_size: 0
+      buffer_size: 0
+      task_stack_size: 0
+      speed_monitor: false
+
   num_channels: 2 #Physical TX bus channel count on STD I2S: 1 or 2. Full-duplex codec-reference profiles often use 2 even while the public speaker stream remains mono.
 
   codec:
@@ -791,21 +837,20 @@ esp_audio_stack:
       address: 0x40
       mic_selected: 0x0F
       gain_db: 24.0        # mic PGA
-      ref_channel: 2       # MIC3 = the DAC loopback channel
-      ref_gain_db: 0.0     # unity PGA
+      #ref_channel: 2       # MIC3 = the DAC loopback channel
+      #ref_gain_db: 0.0     # unity PGA
     output:
       type: es8311
       address: 0x18
       use_mclk: true
       no_dac_ref: true
-  tdm_total_slots: 4
-  tdm_mic_slots: [0]
-  tdm_ref_slot: 1        # Verified playback reference for AEC
-  tx_channel: left
+  
   use_tdm_reference: true
-  buffers_in_psram: true
-  audio_task_stack_in_psram: true
-  #aec_reference: previous_frame   # ignored while use_tdm_reference is set
+  tdm_total_slots: 4    
+  tdm_mic_slots: [0,2]  # working
+  tdm_ref_slot: 1       # Verified playback reference for AEC
+  tx_channel: left
+  #aec_reference: previous_frame
 
 audio:
   codecs:
@@ -824,18 +869,20 @@ speaker:
     sample_rate: 48000
     bits_per_sample: 16
     num_channels: 1
-    buffer_duration: 125ms
+    buffer_duration: 500ms
+    timeout: never               # Use "never" only for always-on raw streams
   # Virtual speakers to combine the announcement and media streams together into one output
   - id: mixing_speaker
     platform: mixer
     output_speaker: box_speaker
+    num_channels: 1
     source_speakers:
       - id: tts_speaker_mix
         timeout: 10s
         buffer_duration: 125ms
       - id: media_speaker_mix
         timeout: 10s
-        buffer_duration: 125ms
+        buffer_duration: 500ms
   # Vritual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
   - platform: resampler
     id: tts_speaker
@@ -855,7 +902,7 @@ media_player:
     # media pipeline (instead of parking it half-owned) so TTS and timer
     # alarms can take the speaker graph while a stream is paused.
     pause_releases_pipeline: true
-    volume_min: 0.4
+    volume_min: 0.2
     volume_max: 0.7
     volume_initial: 0.6
     buffer_size: 131072
@@ -864,12 +911,10 @@ media_player:
       speaker: media_resampling_speaker
       sample_rate: 48000
       format: MP3
-      num_channels: 1
     announcement_pipeline:
       speaker: tts_speaker
       format: FLAC
       sample_rate: 48000
-      num_channels: 1
     files:
       - id: timer_finished_sound
         file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
@@ -877,11 +922,30 @@ media_player:
         file: /config/esphome/sound/super_mario_opening.flac
     on_announcement:
       # Stop the wake word (mWW or VA) if the mic is capturing
-      - mixer_speaker.apply_ducking:
-          id: media_speaker_mix
-          decibel_reduction: 20
-          duration: 0.0s
-
+      - if:
+          condition:
+            - microphone.is_capturing:
+          then:
+            - script.execute: stop_wake_word
+            # Ensure VA stops before moving on
+            - if:
+                condition:
+                  - lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+                then:
+                  - wait_until:
+                      - not:
+                          voice_assistant.is_running:
+      # Since VA isn't running, this is user-intiated media playback. Draw the mute display
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+            - script.execute: draw_display
+      
+    on_play:
+      - script.execute: draw_display
     on_idle:
       # Since VA isn't running, this is the end of user-intiated media playback. Restart the wake word.
       - if:
@@ -892,114 +956,68 @@ media_player:
             - script.execute: start_wake_word
             - script.execute: set_idle_or_mute_phase
             - script.execute: draw_display
-      - mixer_speaker.apply_ducking:
-          id: media_speaker_mix
-          decibel_reduction: 0
-          duration: 1.0s
 
 micro_wake_word:
   id: mww
   stop_after_detection: false
+  microphone: box_mic
   models:
     - hey_jarvis
-    # ── Halt word (unchanged) ─────────────────────────────────────────────
-    - model: https://raw.githubusercontent.com/TaterTotterson/microWakeWords/refs/heads/main/microWakeWords/stop.json
-      id: stop
-      internal: true                 
-      probability_cutoff: 0.40        # model default is 0.5 — your sliding avg comes in around 0.58, so 0.40 fires reliably
-      sliding_window_size: 3          # model default is 5 — fires after 3 frames (~30 ms) instead of 5
+    # ── Halt word (unchanged) ─
+    #- model: https://raw.githubusercontent.com/TaterTotterson/microWakeWords/refs/heads/main/microWakeWords/stop.json
+    #  id: stop
+    #  internal: true                 
+    #  probability_cutoff: 0.40        # model default is 0.5 — your sliding avg comes in around 0.58, so 0.40 fires reliably
+    #  sliding_window_size: 3          # model default is 5 — fires after 3 frames (~30 ms) instead of 5
   vad:
-    probability_cutoff: 0.20
-    sliding_window_size: 1
+  #  probability_cutoff: 0.20
+  #  sliding_window_size: 1
   on_wake_word_detected:
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
     - logger.log:
         tag: mww
-        level: INFO   # default is DEBUG, which the global INFO level compiles out
-        format: "MWW fired: %s"
-        args:
-          - 'wake_word.c_str()'
-    - if:
-        condition:
-          or:
-            - voice_assistant.is_running:
-            - and:
-                - media_player.is_announcing:
-                - lambda: 'return !id(user_cancelled);'
-        then:
-          # A second 'Okay Nabu' / 'Zylox' doesn't just cancel — it re-opens
-          # listening for a fresh turn. 'Stop' stays cancel-only.
-          # ORDER MATTERS: the restart request is recorded BEFORE global_cancel
-          # runs, so the cancel paints the LISTENING page (no idle flash) and
-          # the dying turn's on_end takes its fast-restart path instead of the
-          # full announcement-wait + cleanup sequence.
-          - if:
-              condition:
-                lambda: 'return wake_word != "Stop";'
-              then:
-                - lambda: |-
-                    id(pending_wake_restart) = wake_word;
-                    id(pending_set_ms) = millis();
-          # RE-ENTRY GUARD: while a cancel is already in flight (user_cancelled
-          # is set and no new turn has reached on_listening yet), rapid repeat
-          # detections — the Stop model prefiring on 'Zylox', double-fires of
-          # the zylox model, or an impatient second utterance — must NOT run
-          # global_cancel again: a second cancel's voice_assistant.stop can
-          # kill the very turn the restart machinery just started. Updating
-          # pending_wake_restart above is enough; the in-flight on_end (or the
-          # direct-start below) honors the latest word.
-          - if:
-              condition:
-                lambda: 'return !id(user_cancelled);'
-              then:
-                - script.execute:
-                    id: barge_log
-                    msg: !lambda 'return "cancel:" + wake_word;'
-                - script.execute: global_cancel
-              else:
-                - logger.log:
-                    tag: barge
-                    level: INFO
-                    format: "duplicate barge-in ignored (cancel in flight)"
-                - script.execute:
-                    id: barge_log
-                    msg: "dup-ign"
-          - if:
-              condition:
-                and:
-                  - lambda: 'return !id(pending_wake_restart).empty();'
-                  - not:
-                      voice_assistant.is_running:
-              then:
-                # No pipeline was active (timer alarm, user media, stale TTS
-                # tail): no on_end is coming — start the new turn directly.
-                - logger.log:
-                    tag: barge
-                    level: INFO
-                    format: "direct restart: VA idle at wake time"
-                - script.execute:
-                    id: barge_log
-                    msg: "direct-start"
-                - voice_assistant.start:
-                    wake_word: !lambda return id(pending_wake_restart);
-                - lambda: id(pending_wake_restart).clear();
-        else:
-          # Idle: only the activation word starts a new turn.
-          # 'Stop' while idle is a no-op (logged above) so it cannot summon the assistant.
-          - if:
-              condition:
-                lambda: 'return wake_word != "Stop";'
-              then:
-                - voice_assistant.start:
-                    wake_word: !lambda return wake_word;
+        format: "MWW: wake word detected"
+    - homeassistant.service:
+        service: media_player.media_pause
+        data:
+          entity_id: ${speaker_in_ma}
+    - globals.set:
+        id: g_mww_recent
+        value: "1"
+    - script.execute: draw_display
+    #- script.execute: mww_failsafe
+    #- if:
+    #    condition:
+    #      or:
+    #        - voice_assistant.is_running:
+    #        - lambda: 'return id(g_barge_in_pending) != 0;'
+    #    then:
+    #      - logger.log:
+    #          tag: mww
+    #          format: "MWW: barge-in, stopping VA"
+    #      - globals.set:
+    #          id: g_barge_in_pending
+    #          value: "1"
+    #      - script.execute: barge_failsafe
+    #      - voice_assistant.stop:
+    #      - media_player.stop:
+    #          announcement: true
+    #    else:
+    #      - logger.log:
+    #          tag: mww
+    #          format: "MWW: fresh VA start"
+    #      - voice_assistant.start:
+    #          wake_word: !lambda return wake_word;
 
 voice_assistant:
   id: va
   microphone: box_mic
   media_player: speaker_media_player
   micro_wake_word: mww
-  noise_suppression_level: 2
-  auto_gain: 31dBFS
-  volume_multiplier: 4.0
+  noise_suppression_level: 0   # AFE does NS locally
+  auto_gain: 0dBFS             # Do not add HA-side AGC on top of the AFE profile
+  volume_multiplier: 1.0
   on_listening:
     - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
     - script.execute: draw_display
@@ -1013,6 +1031,7 @@ voice_assistant:
   on_tts_start:
     - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
     - script.execute: draw_display
+
 
   on_end:
     # Branch tracer — INFO so it survives the production log level. The barge-in
@@ -1229,11 +1248,15 @@ voice_assistant:
                       - micro_wake_word.start:
                       # Internal models don't persist enable state — re-assert Stop and the
                       # selected activation word on every restart path, same as start_wake_word.
-                      - micro_wake_word.enable_model: stop
+                      #- micro_wake_word.enable_model: stop
                       - script.execute: boost_mww_priority
                 - script.execute: set_idle_or_mute_phase
     - script.execute: draw_display
 
+    - homeassistant.service:
+        service: media_player.media_play
+        data:
+          entity_id: ${speaker_in_ma}
   on_error:
     - if:
         condition:
@@ -1315,7 +1338,7 @@ script:
           id(check_if_timers).execute();
           if (id(global_is_timer_active) || id(global_is_timer)) {
             id(draw_timer_timeline).execute();
-            return;  // stop here, skip the marquee
+            return;  // exit here, skip the marquee
           }
           Color color1, color2;
           bool skip_marquee = false;
@@ -1681,6 +1704,34 @@ script:
           else:
             - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
       - script.execute: draw_display
+
+  - id: mww_failsafe
+    mode: restart
+    then:
+      - delay: 5s
+      - logger.log:
+          level: WARN
+          format: "MWW failsafe: clearing stuck g_mww_recent"
+      - globals.set:
+          id: g_mww_recent
+          value: "0"
+      - script.execute: draw_display
+  - id: barge_failsafe
+    mode: restart
+    then:
+      - delay: 15s
+      - if:
+          condition:
+            lambda: 'return id(g_barge_in_pending) != 0;'
+          then:
+            - logger.log:
+                level: WARN
+                format: "Barge failsafe: clearing stuck g_barge_in_pending"
+            - globals.set:
+                id: g_barge_in_pending
+                value: "0"
+            - script.execute: draw_display
+
 switch:
   - platform: template
     name: Mute
@@ -2836,6 +2887,12 @@ text_sensor:
     entity_category: diagnostic
     update_interval: never
 
+binary_sensor:
+  - platform: esp_afe
+    esp_afe_id: afe_processor
+    vad:
+      name: "Voice Presence"
+      update_interval: 100ms
 
 select:
   - platform: template
