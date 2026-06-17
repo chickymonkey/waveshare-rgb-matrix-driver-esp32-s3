@@ -1,6 +1,9 @@
-#Version
+#Version 1.4
 #1.1 added zombie animation, star blinking
 #1.2 added block , coin, mario animation
+#1.3 added voice assistant duplex with external component
+#1.4 added continous assistant.
+#todo: sendspin
 ## ref: https://github.com/esphome/esphome/blob/dev/esphome/components/hub75/display.py
 ## https://api-docs.esphome.io/classesphome_1_1hub75_1_1_h_u_b75_display
 ## changed waveshare: https://docs.waveshare.net/ESP32-S3-RGB-Matrix/
@@ -20,6 +23,7 @@
 # =============================================================================
 ---
 substitutions:
+  version: "1.4"
   font_family_clock: Roboto
   font_glyphsets: "GF_Latin_Core"
 
@@ -50,6 +54,23 @@ substitutions:
   voice_assist_timer_finished_phase_id: "20"
 
   speaker_in_ma: media_player.waveshare_matrix_clock_2
+
+  ui_state_idle: "0"
+  ui_state_init: "1"
+  ui_state_no_wifi: "2"
+  ui_state_no_ha: "3"
+  ui_state_both_muted: "4"
+  ui_state_mic_muted: "5"
+  ui_state_spk_muted: "6"
+  ui_state_mww_recent: "7"
+  ui_state_va_listening: "8"
+  ui_state_va_thinking: "9"
+  ui_state_va_replying: "10"
+  ui_state_ic_ringing: "11"
+  ui_state_ic_outgoing: "12"
+  ui_state_ic_streaming: "13"
+  ui_state_va_error: "14"
+  ui_state_media: "15"
  
 esphome:
   name: waveshare-matrix-clock
@@ -151,7 +172,7 @@ logger:
     audio: DEBUG
     micro_wake_word: DEBUG
     voice_assistant: DEBUG
-    media_player: DEBUG
+    media_player: INFO
 api:
   encryption:
     key: !secret api_key
@@ -294,7 +315,7 @@ globals:
     type: int
     initial_value: '32'
 
-  # Stars
+ # Stars
   - id: twinkle_index
     type: int
     initial_value: '0'
@@ -464,6 +485,10 @@ globals:
     initial_value: "0"
 
   #duplex settings
+  - id: g_va_state # 1-state_va_listening 2-state_va_thinking 3-state_va_replying 4-state_va_error
+    type: int
+    restore_value: false
+    initial_value: "0"
   - id: g_barge_in_pending
     type: int
     restore_value: false
@@ -484,7 +509,19 @@ globals:
     type: int
     restore_value: false
     initial_value: "0"
-
+  - id: ui_state
+    type: int
+    restore_value: false
+    initial_value: "-1"
+ # voice assistant continues - turn ID added.
+  - id: g_va_turn_id
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: g_end_turn_snapshot
+    type: int
+    restore_value: false
+    initial_value: "0"
 button:
   - platform: restart
     id: reboot_btn
@@ -875,6 +912,8 @@ speaker:
     task_stack_in_psram: true
 
 media_player:
+  - platform: sendspin
+    id: sendspin_group_media_player
   - platform: speaker
     name: None
     id: speaker_media_player
@@ -911,12 +950,41 @@ media_player:
             ESP_LOGI("post_va_media", "Media started during VA turn, flagging for post-VA resume");
             id(g_media_started_during_va) = true;
           }
-      - script.execute: draw_display
-
+      - script.execute: update_status
+    
+    on_pause:
+      - script.execute: update_status
+    on_announcement:
+      # Stop the wake word (mWW or VA) if the mic is capturing
+      - if:
+          condition:
+            - microphone.is_capturing:
+          then:
+            - script.execute: stop_wake_word
+            # Ensure VA stops before moving on
+            - if:
+                condition:
+                  - lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+                then:
+                  - wait_until:
+                      - not:
+                          voice_assistant.is_running:
+      # Since VA isn't running, this is user-intiated media playback. Draw the mute display
+      - if:
+          condition:
+            and:
+              - media_player.is_announcing:
+                  id: speaker_media_player
+              - not:
+                  voice_assistant.is_running:
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+      - script.execute: update_status
 
     on_idle:
       #- lambda: id(speaker_was_playing) = false;   # ← add this line
       # Since VA isn't running, this is the end of user-intiated media playback. Restart the wake word.
+      - delay: 150ms
       - if:
           condition:
             not:
@@ -924,7 +992,7 @@ media_player:
           then:
             - script.execute: start_wake_word
             - script.execute: set_idle_or_mute_phase
-            - script.execute: draw_display
+            - script.execute: update_status
     #used to resume music playing
     on_state:
       if:
@@ -950,20 +1018,24 @@ voice_assistant:
   # When the voice assistant starts: pause audio.
 
   on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
     - logger.log:
         tag: va
         format: "VA: on_listening"
-
+    - globals.set:
+        id: g_va_state
+        value: "1"
+    - globals.set:
+        id: g_va_turn_id        # ← new global turn ID, increments each turn
+        value: !lambda 'return id(g_va_turn_id) + 1;'
     # Clear the speaker-paused flag set by global_cancel. Without this, the wake-chime
     # plus subsequent TTS would play through the paused TX path and only produce silence.
-    #- lambda: id(va_started_playback) = false;   # ← reset at turn start
     - lambda: id(box_speaker).set_pause_state(false);
     - lambda: id(user_cancelled) = false;
     # A turn is starting — any deferred barge-in restart is moot now. Clearing
     # here keeps a stale flag (e.g. from a turn whose on_end never consumed it)
     # from spawning a surprise extra turn after some later, unrelated turn.
     - lambda: id(pending_wake_restart).clear();
-    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
     - globals.set:
         id: g_mww_recent
         value: "0"
@@ -971,18 +1043,21 @@ voice_assistant:
         id: g_barge_in_pending
         value: "0"
     - script.stop: mww_failsafe
-    - script.stop: barge_failsafe
-    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
-    - script.execute: draw_display
+    #- script.stop: barge_failsafe
+    - script.execute: update_status
     - media_player.speaker.play_on_device_media_file:
         media_file: wake_word_triggered_sound
         announcement: true
+        id: speaker_media_player
   on_stt_vad_end:
     - logger.log:
         tag: va
         format: "VA: on_stt_vad_end (thinking)"
+    - globals.set:
+        id: g_va_state
+        value: "2"
     - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
-    - script.execute: draw_display
+    - script.execute: update_status
 
   on_stt_end:
     - script.execute: draw_display
@@ -992,8 +1067,10 @@ voice_assistant:
         tag: va
         format: "VA: on_tts_start (speaking)"
     - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
-    - script.execute: draw_display
-
+    - globals.set:
+        id: g_va_state
+        value: "3"
+    - script.execute: update_status
 
   on_end:
     # Branch tracer — INFO so it survives the production log level.
@@ -1005,7 +1082,7 @@ voice_assistant:
           - id(pending_wake_restart).c_str()
           - 'id(speaker_media_player)->state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING'
           - 'id(va).is_running()'
-    - script.execute:
+    - script.execute: #barge_log
         id: barge_log
         msg: !lambda |-
           char b[64];
@@ -1014,16 +1091,32 @@ voice_assistant:
                    (int) (id(speaker_media_player)->state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING),
                    (int) id(va).is_running());
           return std::string(b);
-
-    - script.execute: va_end_handler
-    - script.execute: media_started_by_va
-    - script.execute: draw_display
-    # Clear VA state now that the turn is fully resolved.
+    
+    - lambda: |-
+        // Snapshot the turn id so the delayed cleanup can detect a new turn started
+        id(g_end_turn_snapshot) = id(g_va_turn_id);
+    - delay: 150ms     # ← let a continuing turn's on_listening preempt us
     - if:
         condition:
-          lambda: 'return id(speaker_was_playing);'
+          lambda: 'return id(g_va_turn_id) == id(g_end_turn_snapshot);'
         then:
-          - script.execute: deferred_media_resume
+          # No new turn started — this really is the end
+          - script.execute: va_end_handler
+          - script.execute: media_started_by_va
+          - script.execute: update_status
+          - globals.set:
+              id: g_va_state
+              value: "0"
+          - if:
+              condition:
+                lambda: 'return id(speaker_was_playing);'
+              then:
+                - script.execute: deferred_media_resume
+        else:
+          - logger.log:
+              tag: va
+              level: INFO
+              format: "on_end: new turn started, skipping cleanup"
 
   on_error:
     - logger.log:
@@ -1048,8 +1141,14 @@ voice_assistant:
                 lambda: 'return !id(init_in_progress);'
               then:
                 - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+                - globals.set:
+                    id: g_va_state
+                    value: "4"  
                 - script.execute: draw_display
                 - delay: 1s
+                - globals.set:
+                    id: g_va_state
+                    value: "0"
                 - if:
                     condition:
                       switch.is_off: mute
@@ -1057,10 +1156,8 @@ voice_assistant:
                       - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
                     else:
                       - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
-                - script.execute: draw_display
-              else:
-                - script.execute: draw_display
 
+          - script.execute: update_status
   on_client_connected:
     - logger.log:
         tag: va
@@ -1090,6 +1187,7 @@ voice_assistant:
     - component.update: matrix_display
     - wait_until:
         media_player.is_announcing:
+          id: speaker_media_player
     - lambda: id(voice_assistant_phase) = ${voice_assist_timer_finished_phase_id};
     - script.execute: draw_display
 
@@ -1109,8 +1207,30 @@ micro_wake_word:
         format: "MWW fired: %s"
         args:
           - 'wake_word.c_str()'
-    # pausing music if playing
+    - globals.set:
+        id: g_mww_recent
+        value: "1"
+    - script.execute: update_status
+    - script.execute: mww_failsafe
     - if:
+        condition:
+          or:
+            - voice_assistant.is_running:
+            - lambda: 'return id(g_barge_in_pending) != 0;'
+        then:
+          - logger.log:
+              tag: mww
+              format: "MWW: barge-in, stopping VA"
+          - globals.set:
+              id: g_barge_in_pending
+              value: "1"
+          - script.execute: barge_failsafe
+          - voice_assistant.stop:
+          - media_player.stop:
+              id: speaker_media_player
+              announcement: true
+    # Duck media speaker volume if playing music
+    - if:  #ducking volume
         condition:
           lambda: |-
             using S = media_player::MediaPlayerState;
@@ -1130,17 +1250,14 @@ micro_wake_word:
                 - globals.set:
                     id: g_ducking_active
                     value: "1"
-          # pause music
-          #- homeassistant.action:
-          #    action: media_player.media_pause
-          #    data:
-          #      entity_id: ${speaker_in_ma}               
+           
     - if:
         condition:
           or:
             - voice_assistant.is_running:
             - and:
                 - media_player.is_announcing:
+                    id: speaker_media_player
                 - lambda: 'return !id(user_cancelled);'
         then:
           - if:
@@ -1187,6 +1304,7 @@ script:
       - media_player.speaker.play_on_device_media_file:
           media_file: mario_sound_main
           announcement: true
+          id: speaker_media_player
 
   - id: select_display_page
     then:
@@ -1582,6 +1700,7 @@ script:
       - voice_assistant.stop:
       - media_player.stop:
           announcement: true
+          id: speaker_media_player
       - media_player.stop: speaker_media_player
       - lambda: |-
           id(box_speaker).set_pause_state(true);
@@ -1599,7 +1718,7 @@ script:
             - script.execute: set_idle_or_mute_phase
           else:
             - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
-      - script.execute: draw_display
+      - script.execute: update_status
    
   - id: barge_failsafe
     mode: restart
@@ -1615,7 +1734,7 @@ script:
             - globals.set:
                 id: g_barge_in_pending
                 value: "0"
-            - script.execute: draw_display
+            - script.execute: update_status
   #  # Core scripts -  voice assistant duplex
                 
   # Starts either mWW or the streaming wake word, depending on the configured location
@@ -1643,6 +1762,7 @@ script:
                   micro_wake_word.is_running:
               - not:
                   media_player.is_announcing:
+                    id: speaker_media_player
               - lambda: return id(wake_word_engine_location).state == "On device";
           then:
             - lambda: id(va).set_use_wake_word(false);
@@ -1705,6 +1825,7 @@ script:
           condition:
             or:
               - media_player.is_announcing:
+                  id: speaker_media_player
               - speaker.is_playing:
                   id: tts_speaker
           timeout: 2s
@@ -1713,6 +1834,7 @@ script:
             and:
               - not:
                   media_player.is_announcing:
+                    id: speaker_media_player
               - not:
                   speaker.is_playing:
                       id: tts_speaker
@@ -1723,6 +1845,7 @@ script:
           condition:
             or:
               - media_player.is_announcing:
+                  id: speaker_media_player
               - speaker.is_playing:
                   id: tts_speaker
           then:
@@ -1730,34 +1853,51 @@ script:
                 level: WARN
                 format: "VA: TTS drain timeout, forcing cleanup"
             - media_player.stop:
+                id: speaker_media_player
                 announcement: true
-      - delay: 100ms
-      - voice_assistant.stop:
+      #- delay: 100ms
+      #- voice_assistant.stop:   #this stops voice asssistant unconditionally
+      # ── give HA a window to start a continuation before we stop VA ──
+      - delay: 600ms
       - if:
           condition:
-            lambda: 'return id(g_barge_in_pending) != 0;'
+            lambda: |-
+              // If VA moved into listening again (g_va_state==1) during our wait,
+              // a continuation has already taken over — don't stop it.
+              return id(g_va_state) == 1;
           then:
             - logger.log:
                 tag: va
-                format: "VA: barge restart"
-            - wait_until:
-                condition:
-                  not:
-                    voice_assistant.is_running:
-                timeout: 2s
-            - delay: 200ms
-            - voice_assistant.start:
+                level: INFO
+                format: "VA: continuation detected, skipping stop"
           else:
-            - logger.log:
-                tag: va
-                format: "VA: end, clearing state"
-            - script.execute: set_idle_or_mute_phase
-            - script.execute: draw_display
-            - script.execute: start_wake_word
-            - script.execute: deferred_media_resume
+            - voice_assistant.stop:
+            - if:
+                condition:
+                  lambda: 'return id(g_barge_in_pending) != 0;'
+                then:
+                  - logger.log:
+                      tag: va
+                      format: "VA: barge restart"
+                  - wait_until:
+                      condition:
+                        not:
+                          voice_assistant.is_running:
+                      timeout: 2s
+                  - delay: 200ms
+                  - voice_assistant.start:
+                else:
+                  - logger.log:
+                      tag: va
+                      format: "VA: end, clearing state"
+                  - globals.set:
+                      id: g_va_state
+                      value: "0"
+                  - script.execute: update_status
+                  - script.execute: set_idle_or_mute_phase
+                  - script.execute: start_wake_word
+                  - script.execute: deferred_media_resume
 
-  - id: va_end_cleanup
-    then: []
 
   - id: mww_failsafe
     mode: restart
@@ -1769,8 +1909,58 @@ script:
       - globals.set:
           id: g_mww_recent
           value: "0"
+      - script.execute: update_status
+  - id: update_status
+    mode: restart
+    then:
+      - lambda: |-
+          // Central UI reducer. Priority order:
+          //   init/connectivity > mute states > wake-word
+          //   > VA (listening/thinking/responding) > intercom call
+          //   > VA error > media playback > idle.
+          // Device-local overlays such as timer alarm, settings pages, or
+          // "call ended" pages live in each renderer because not every full
+          // device includes those optional UI concepts.
+          // VA responding sits above intercom so concurrent TTS always shows
+          // blue even while a call is active; when TTS ends the evaluator
+          // falls back to the underlying call (green) or music (blue).
+          // Media playback target covers both STATE_PLAYING and
+          // STATE_ANNOUNCING so the LED stays blue when music pauses for a
+          // TTS announcement instead of flashing to off and back.
+          using S = media_player::MediaPlayerState;
+          auto mp_state = id(speaker_media_player).state;
+          bool media_active = (mp_state == S::MEDIA_PLAYER_STATE_PLAYING ||
+                               mp_state == S::MEDIA_PLAYER_STATE_ANNOUNCING);
+          int state = ${ui_state_idle};
+          int led = 0;
+          if (id(init_in_progress)) {
+            state = ${ui_state_init};
+          } else if (!wifi::global_wifi_component->is_connected()) {
+            state = ${ui_state_no_wifi};
+          } else if (!api::global_api_server->is_connected()) {
+            state = ${ui_state_no_ha};
+          } else if (id(g_mww_recent) || id(g_barge_in_pending)) {
+            state = ${ui_state_mww_recent};
+            led = 4;
+          } else if (id(g_va_state) == 1) {
+            state = ${ui_state_va_listening};
+            led = 5;
+          } else if (id(g_va_state) == 2) {
+            state = ${ui_state_va_thinking};
+            led = 6;
+          } else if (id(g_va_state) == 3) {
+            state = ${ui_state_va_replying};
+            led = 7;
+          }  else if (id(g_va_state) == 4) {
+            state = ${ui_state_va_error};
+            led = 11;
+          } else if (media_active) {
+            state = ${ui_state_media};
+            led = 12;
+          }
+          id(ui_state) = state;
       - script.execute: draw_display
-
+      
 
   - id: deferred_media_resume
     mode: restart
@@ -1779,6 +1969,7 @@ script:
           condition:
             not:
               media_player.is_announcing:
+                id: speaker_media_player
           timeout: 12s
       - delay: 300ms
       - if:
@@ -1788,6 +1979,7 @@ script:
                   voice_assistant.is_running:
               - not:
                   media_player.is_announcing:
+                    id: speaker_media_player
               - lambda: |-
                   using S = media_player::MediaPlayerState;
                   return id(speaker_was_playing)
@@ -1832,6 +2024,7 @@ script:
                                     voice_assistant.is_running:
                                 - not:
                                     media_player.is_announcing:
+                                      id: speaker_media_player
                             then:
                               - mixer_speaker.apply_ducking:
                                   id: media_speaker_mix
@@ -1867,6 +2060,7 @@ script:
           condition:
             not:
               media_player.is_announcing:
+                id: speaker_media_player
           timeout: 12s
       - wait_until:
           condition:
@@ -1882,6 +2076,7 @@ script:
                   voice_assistant.is_running:
               - not:
                   media_player.is_announcing:
+                    id: speaker_media_player
               - lambda: |-
                   return id(speaker_media_player).state
                       == media_player::MEDIA_PLAYER_STATE_PAUSED;
@@ -1943,6 +2138,7 @@ switch:
               id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
       # Stop playing the alarm
       - media_player.stop:
+          id: speaker_media_player
           announcement: true
     on_turn_on:
       # Turn on the repeat mode and pause for 1000 ms between playlist items/repeats
@@ -3123,3 +3319,7 @@ color:
     hex: "26ed3a"
   - id: paused_timer_color
     hex: "3b89e3"
+
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: false
