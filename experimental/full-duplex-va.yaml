@@ -1,4 +1,5 @@
 #Version 1.4
+# hardware: https://www.waveshare.com/esp32-s3-rgb-matrix.htm
 #1.1 added zombie animation, star blinking
 #1.2 added block , coin, mario animation
 #1.3 added voice assistant duplex with external component. 
@@ -6,9 +7,16 @@
 #1.3.2 able to control music assistant with the blueprint https://github.com/music-assistant/voice-support/blob/main/local-assist-blueprint/mass_assist_blueprint_en.yaml
 #1.4 added continous assistant.
 #todo: sendspin
-## ref: https://github.com/esphome/esphome/blob/dev/esphome/components/hub75/display.py
+################################################################
+## reference project: 
+## big shoutout to below projects that maximized the potential of the board.
+## https://github.com/esphome/esphome/blob/dev/esphome/components/hub75/display.py
 ## https://api-docs.esphome.io/classesphome_1_1hub75_1_1_h_u_b75_display
 ## changed waveshare: https://docs.waveshare.net/ESP32-S3-RGB-Matrix/
+## https://github.com/esphome/home-assistant-voice-pe/tree/dev
+## https://github.com/maxi1134/Home-Assistant-Config/blob/master/esphome/templates/ESP32-S3-BOX-3/maxi_assistants_main_code_full_cloud.yaml
+## https://github.com/n-IA-hane/esphome-intercom/blob/main/packages/voice_assistant/core.yaml
+#######################################
 # Empirical TDM mapping on this board:
 #   - slot 2 = left microphone  (left of the GPIO connector)
 #   - slot 0 = right microphone (right of the GPIO connector)
