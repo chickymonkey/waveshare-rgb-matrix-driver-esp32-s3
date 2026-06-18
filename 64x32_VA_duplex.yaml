@@ -1,0 +1,3335 @@
+#Version 1.4
+# hardware: https://www.waveshare.com/esp32-s3-rgb-matrix.htm
+#1.1 added zombie animation, star blinking
+#1.2 added block , coin, mario animation
+#1.3 added voice assistant duplex with external component. 
+#1.3.1 able to start/stop the player defined by builtin speaker
+#1.3.2 able to control music assistant with the blueprint https://github.com/music-assistant/voice-support/blob/main/local-assist-blueprint/mass_assist_blueprint_en.yaml
+#1.4 added continous assistant.
+#todo: sendspin
+################################################################
+## reference project: 
+## big shoutout to below projects that maximized the potential of the board.
+## https://github.com/esphome/esphome/blob/dev/esphome/components/hub75/display.py
+## https://api-docs.esphome.io/classesphome_1_1hub75_1_1_h_u_b75_display
+## changed waveshare: https://docs.waveshare.net/ESP32-S3-RGB-Matrix/
+## https://github.com/esphome/home-assistant-voice-pe/tree/dev
+## https://github.com/maxi1134/Home-Assistant-Config/blob/master/esphome/templates/ESP32-S3-BOX-3/maxi_assistants_main_code_full_cloud.yaml
+## https://github.com/n-IA-hane/esphome-intercom/blob/main/packages/voice_assistant/core.yaml
+#######################################
+# Empirical TDM mapping on this board:
+#   - slot 2 = left microphone  (left of the GPIO connector)
+#   - slot 0 = right microphone (right of the GPIO connector)
+#   - slot 1 = playback reference used by AEC
+#   - slot 3 = near-silent / unused on this board revision
+#
+# Dual-mic target:
+#   ES7210 TDM slots [0, 2]     → esp_ae_rate_cvt x3 ──┐
+#   ES7210 TDM slot 1 (DAC ref) → esp_ae_rate_cvt x3 ──┴─ esp_afe (AEC + Speech Enhancement + VAD) → mono mic_main → VA / MWW
+#
+#   Music/radio → media_speaker (resampler) ───────────┐
+#                                                      ┼── mixer (48kHz) → hw_speaker → ES8311 DAC
+#   VA TTS      → tts_speaker (resampler) ─────────────┘
+# =============================================================================
+---
+substitutions:
+  version: "1.4"
+  font_family_clock: Roboto
+  font_glyphsets: "GF_Latin_Core"
+
+  jan: Jan
+  feb: Feb
+  mar: Mar
+  apr: Apr
+  may: May
+  jun: Jun
+  jul: Jul
+  aug: Aug
+  sept: Sep
+  oct: Oct
+  nov: Nov
+  dec: Dec
+  #brightness 
+  day_brightness: 35
+  night_brightness: 15
+  
+  #voice assistant
+  voice_assist_idle_phase_id: "1"
+  voice_assist_listening_phase_id: "2"
+  voice_assist_thinking_phase_id: "3"
+  voice_assist_replying_phase_id: "4"
+  voice_assist_not_ready_phase_id: "10"
+  voice_assist_error_phase_id: "11"
+  voice_assist_muted_phase_id: "12"
+  voice_assist_timer_finished_phase_id: "20"
+
+  speaker_in_ma: media_player.waveshare_matrix_clock_2
+
+  ui_state_idle: "0"
+  ui_state_init: "1"
+  ui_state_no_wifi: "2"
+  ui_state_no_ha: "3"
+  ui_state_both_muted: "4"
+  ui_state_mic_muted: "5"
+  ui_state_spk_muted: "6"
+  ui_state_mww_recent: "7"
+  ui_state_va_listening: "8"
+  ui_state_va_thinking: "9"
+  ui_state_va_replying: "10"
+  ui_state_ic_ringing: "11"
+  ui_state_ic_outgoing: "12"
+  ui_state_ic_streaming: "13"
+  ui_state_va_error: "14"
+  ui_state_media: "15"
+ 
+esphome:
+  name: waveshare-matrix-clock
+  friendly_name: waveshare Matrix Clock
+  min_version: 2026.5.0  # requires ESPHome 2026.5.x or newer
+  on_boot:
+    - priority: -100
+      then:
+        - script.execute: select_display_page
+        - component.update: matrix_display
+        - lambda: |-
+            if (id(matrix_backlight).current_values.is_on()) {
+              if (id(matrix_backlight).current_values.is_on()) {
+                int brightness = id(sunstate).is_above_horizon() 
+                  ? ${day_brightness} 
+                  : ${night_brightness};
+                id(matrix_display).set_brightness(brightness);
+              }
+            }
+              
+        - lambda: |- # gyroscope
+            ESP_LOGI("QMI8658", "Initializing...");
+
+            // WHO_AM_I check
+            uint8_t whoami_reg = 0x00;
+            uint8_t whoami = 0;
+            if (id(i2c_adc_dac)->write_readv(0x6B, &whoami_reg, 1, &whoami, 1) == i2c::ERROR_OK) {
+              ESP_LOGI("QMI8658", "WHO_AM_I = 0x%02X (expect 0x05)", whoami);
+            } else {
+              ESP_LOGE("QMI8658", "WHO_AM_I read failed - check wiring/address");
+            }
+
+            // CTRL1: interface config (auto-increment, INT active-high push-pull)
+            uint8_t ctrl1[] = {0x02, 0x60};
+            id(i2c_adc_dac)->write(0x6B, ctrl1, 2);
+
+            // CTRL2: accel ±2g, 125Hz ODR
+            uint8_t ctrl2[] = {0x03, 0x04};
+            id(i2c_adc_dac)->write(0x6B, ctrl2, 2);
+
+            // CTRL3: gyro ±512dps, 125Hz ODR  
+            uint8_t ctrl3[] = {0x04, 0x54};
+            id(i2c_adc_dac)->write(0x6B, ctrl3, 2);
+
+            // CTRL7: enable accel + gyro
+            uint8_t ctrl7[] = {0x08, 0x03};
+            id(i2c_adc_dac)->write(0x6B, ctrl7, 2);
+
+            ESP_LOGI("QMI8658", "Init complete");
+        
+        # Speaker Gain on top of the codec's freshly-initialized DAC volume.
+        #- script.execute: apply_speaker_gain
+    - priority: 600
+      then:
+        - delay: 10s
+        - script.execute: play_mario_sound
+
+esp32:
+  board: esp32-s3-devkitc-1-n32r8v
+  flash_size: 32MB
+  partitions: partitions32mb.csv
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_SPIRAM: "y"
+      CONFIG_ESP32S3_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL: "65536"
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_SPIRAM_USE_CAPS_ALLOC: "n"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL: "4096"
+      CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP: "y"
+      CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM: "y"
+      CONFIG_MDNS_MEMORY_ALLOC_SPIRAM: "y"
+    advanced:
+      enable_idf_experimental_features: true
+      execute_from_psram: true
+      compiler_optimization: "PERF"
+external_components:
+  # n-IA-hane/esphome-intercom, pinned to a validated release, I will just use it's full duplex stack, and let HA handle VA, MWW, so below components are used.
+  - source: github://n-IA-hane/esphome-intercom@v2026.6.2
+    components: [audio_processor, esp_audio_stack, esp_aec, speaker]
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+  level: DEBUG
+  logs:
+    sensor: WARN
+    component: WARN
+    select: INFO
+    light: INFO
+    speaker: DEBUG
+    audio: DEBUG
+    micro_wake_word: DEBUG
+    voice_assistant: DEBUG
+    media_player: INFO
+api:
+  encryption:
+    key: !secret api_key
+ota:
+  - platform: esphome
+    password: !secret ota_key
+    on_begin: # prevent  flickering during OTA
+      - lambda: 
+          id(matrix_display).set_brightness(0);
+wifi:
+  id: wifi_component
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Digi-Clock Hotspot"
+    password: !secret ap_password
+  manual_ip:
+    static_ip: 192.168.3.108
+    gateway: 192.168.3.1
+    subnet: 255.255.255.0
+    dns1: 192.168.3.1
+captive_portal:
+globals:
+  - id: page_no
+    type: int
+    restore_value: True
+    initial_value: '1'
+
+  - id: page_count
+    type: int
+    restore_value: no
+    initial_value: '3'
+
+  ## === Mario global===
+  - id: mario_x
+    type: int
+    initial_value: '6'
+
+  - id: mario_y
+    type: int
+    initial_value: '27'
+
+  # Mario colors
+  - id: col_red
+    type: Color
+    initial_value: 'Color(200, 0, 0)'
+
+  - id: col_skin
+    type: Color
+    initial_value: 'Color(255, 185, 120)'
+
+  - id: col_brown
+    type: Color
+    initial_value: 'Color(100, 55, 25)'
+
+  - id: col_black
+    type: Color
+    initial_value: 'Color(10, 10, 10)'
+
+  # Mario Animation state machine
+  - id: mario_anim_state
+    type: int
+    initial_value: '0'
+
+  - id: mario_anim_tick
+    type: int
+    initial_value: '0'
+
+  - id: mario_base_y
+    type: int
+    initial_value: '27'
+
+  - id: block_base_y
+    type: int
+    initial_value: '3'
+
+  # Colors
+  - id: col_lime
+    type: Color
+    initial_value: 'Color(65, 175, 46)'
+
+  - id: col_blue
+    type: Color
+    initial_value: 'Color(63, 63, 181)'
+
+  - id: col_yellow
+    type: Color
+    initial_value: 'Color(255, 255, 0)'
+
+  - id: col_orange
+    type: Color
+    initial_value: 'Color(255, 87, 34)'
+
+  - id: col_light_blue
+    type: Color
+    initial_value: 'Color(120, 180, 220)'
+
+  - id: col_shoe
+    type: Color
+    initial_value: 'Color(60, 30, 10)'
+
+  # Foreground / scene colors
+  - id: col_white
+    type: Color
+    initial_value: 'Color(240, 240, 240)'
+
+  - id: col_panel_border
+    type: Color
+    initial_value: 'Color(200, 40, 0)'
+
+  - id: col_bush
+    type: Color
+    initial_value: 'Color(144, 253, 117)'
+
+  - id: col_green
+    type: Color
+    initial_value: 'Color(0, 144, 90)'
+
+  - id: col_ground_fill
+    type: Color
+    initial_value: 'Color(49, 21, 11)'
+    
+  - id: col_mario_skin2
+    type: Color
+    initial_value: 'Color(220, 190, 150)'
+
+  - id: col_gold
+    type: Color
+    initial_value: 'Color(255, 235, 59)'
+  - id: col_sky
+    type: Color
+    initial_value: 'Color(120, 110, 255)'
+
+  # Pipe position
+  - id: pipe_x
+    type: int
+    initial_value: '42'
+
+  - id: pipe_y
+    type: int
+    initial_value: '32'
+
+ # Stars
+  - id: twinkle_index
+    type: int
+    initial_value: '0'
+
+  # ===== Minecraft Colors =====
+  - id: mc_dirt
+    type: Color
+    initial_value: 'Color(121, 85, 58)'
+
+  - id: mc_dirt_dark
+    type: Color
+    initial_value: 'Color(100, 70, 45)'
+
+  - id: mc_dirt_light
+    type: Color
+    initial_value: 'Color(145, 110, 85)'
+
+  - id: mc_grass
+    type: Color
+    initial_value: 'Color(95, 160, 40)'
+
+  - id: mc_grass_dark
+    type: Color
+    initial_value: 'Color(65, 125, 30)'
+
+ # Steve in minecraft
+  - id: steve_hair
+    type: Color
+    initial_value: 'Color(157, 82, 48)'
+
+  - id: steve_skin
+    type: Color
+    initial_value: 'Color(255, 160, 210)'
+
+  - id: steve_eye
+    type: Color
+    initial_value: 'Color(9, 71, 185)'
+
+  - id: steve_shirt
+    type: Color
+    initial_value: 'Color(8, 220, 194)'
+
+  - id: steve_pants
+    type: Color
+    initial_value: 'Color(0, 60, 180)'
+
+  - id: steve_sword
+    type: Color
+    initial_value: 'Color(200, 200, 200)'
+
+  - id: steve_sword_dark
+    type: Color
+    initial_value: 'Color(120, 120, 120)'
+
+ # Zombie movement
+  - id: zombie_offset
+    type: int
+    initial_value: '0'
+
+  - id: zombie_dir
+    type: int
+    initial_value: '-1'
+
+  - id: zombie_last_step
+    type: uint32_t
+    initial_value: '0'
+
+ # Screen rotation
+  - id: screen_laid
+    type: bool
+    restore_value: 'True'
+    initial_value: 'false'
+  - id: screen_faced_down
+    type: bool
+    restore_value: 'True'
+    initial_value: 'false'
+
+  - id: side_lifted
+    type: bool
+    restore_value: 'True'
+    initial_value: 'false'
+ #Voice assistant duplex
+  - id: init_in_progress
+    type: bool
+    restore_value: false
+    initial_value: "true"
+  - id: voice_assistant_phase
+    type: int
+    restore_value: false
+    initial_value: ${voice_assist_not_ready_phase_id}
+  - id: global_first_active_timer
+    type: voice_assistant::Timer
+    restore_value: false
+  - id: global_is_timer_active
+    type: bool
+    restore_value: false
+  - id: global_first_timer
+    type: voice_assistant::Timer
+    restore_value: false
+  - id: global_is_timer
+    type: bool
+    restore_value: false
+
+  - id: local_volume_adjusting
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: local_volume_value
+    type: float
+    restore_value: yes
+    initial_value: '0.6'
+  ##Voice assistant color:
+  - id: marquee_offset
+    type: int
+    restore_value: no
+    initial_value: '0'
+  
+  # speaker state for sreen rotation or VA change
+  - id: speaker_was_playing
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # va started music: true if player was paused before va, then started during va, and then paused again due to tts announcement.
+  - id: g_media_started_during_va
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  # screen oritation control
+
+  - id: privacy_music_was_playing  # owned exclusively by privacy mode scripts
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: privacy_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: speaker_volume_target
+    type: float
+    restore_value: yes
+    initial_value: '0.50'
+  
+  # Speaker Gain layering state (codec mode): codec-rewrite detection.
+  - id: gain_base
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: gain_last_written
+    type: int
+    restore_value: false
+    initial_value: "-1"
+
+  - id: user_cancelled
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  # Wake word that requested a cancel+restart, consumed by voice_assistant.on_end.
+  # Empty = no restart pending.
+  - id: pending_wake_restart
+    type: std::string
+    restore_value: false
+  - id: pending_set_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  #duplex settings
+  - id: g_va_state # 1-state_va_listening 2-state_va_thinking 3-state_va_replying 4-state_va_error
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: g_barge_in_pending
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: g_mww_recent
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: g_mww_running
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: g_ota_in_progress
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: g_ducking_active
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: ui_state
+    type: int
+    restore_value: false
+    initial_value: "-1"
+ # voice assistant continues - turn ID added.
+  - id: g_va_turn_id
+    type: int
+    restore_value: false
+    initial_value: "0"
+  - id: g_end_turn_snapshot
+    type: int
+    restore_value: false
+    initial_value: "0"
+button:
+  - platform: restart
+    id: reboot_btn
+    name: "Reboot Clock"
+  - platform: template
+    name: "Force Unduck"
+    id: force_unduck_btn
+    icon: "mdi:volume-high"
+    on_press:
+      - logger.log:
+          tag: media_resume
+          level: INFO
+          format: "Force unduck triggered manually (ducking=%d)"
+          args:
+            - 'id(g_ducking_active)'
+      - mixer_speaker.apply_ducking:
+          id: media_speaker_mix
+          decibel_reduction: 0
+          duration: 500ms
+      - globals.set:
+          id: g_ducking_active
+          value: "0"
+      - lambda: 'id(speaker_was_playing) = false;'
+number:
+  - platform: template
+    name: "Brightness"
+    id: led_brightness
+    min_value: 0
+    max_value: 100
+    step: 2
+    optimistic: true
+    initial_value: ${day_brightness}
+    set_action:
+      - lambda: |-
+          if (id(matrix_backlight).current_values.is_on()) {
+            id(matrix_display).set_brightness(x);
+          }
+  - platform: esp_audio_stack
+    esp_audio_stack_id: audio_stack
+ #    master_volume:
+ #      id: master_volume
+ #      name: Master Volume
+ #      speaker_id: box_speaker
+    mic_gain:
+      id: mic_gain
+      name: Mic Gain
+      min_value: -20
+      max_value: 30
+
+  - platform: template
+    name: Speaker Gain
+    id: speaker_gain
+    icon: "mdi:volume-plus"
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 25
+    min_value: 15
+    max_value: 30
+    step: 0.5
+    unit_of_measurement: dB
+    mode: slider
+    on_value:
+      - script.execute: apply_speaker_gain
+
+interval:
+  - interval: 1400ms
+    id: twinkle_stars
+    then:
+      - lambda: |-
+          bool day = id(sunstate).is_above_horizon();
+          if (id(screen_laid) || id(screen_faced_down) || id(side_lifted) || id(page_no) != 1 || day) return;
+
+          if (!day) {
+            // Night star twinkle
+            id(twinkle_index) = (id(twinkle_index) + 1) % 2;
+          }
+          
+          id(matrix_display).update();
+  
+  - interval: 200ms
+    id: mario_animation
+    then:
+      - lambda: |-
+          if (id(page_no) != 1) return;  // only run on Mario page
+
+          id(mario_anim_tick) += 1;
+
+          switch (id(mario_anim_state)) {
+
+            case 0:  // IDLE — wait ~2.5 seconds then start jump: 12 x 200ms
+              if (id(mario_anim_tick) >= 12) {
+                id(mario_anim_state) = 1;
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+
+            case 1:  // JUMPING UP — 3 pixel
+              id(mario_y) = id(mario_base_y) - 3;
+              if (id(mario_anim_tick) >= 1) {
+                id(mario_anim_state) = 4;   // ← go to delay state, not hit
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+
+            case 4:  // DELAY — mario holds at peak for ~400ms before block moves
+              if (id(mario_anim_tick) >= 1) {   // 1 ticks × 400ms = 400ms
+                id(mario_anim_state) = 2;
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+
+            case 2:  // HIT — block bumps for ~400ms
+              if (id(mario_anim_tick) >= 1) {   // 1 ticks × 400ms = 400ms
+                id(mario_anim_state) = 3;
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+
+            case 3:  // FALLING — mario returns to ground
+              id(mario_y) = id(mario_base_y);
+              if (id(mario_anim_tick) >= 1) {
+                id(mario_y)          = id(mario_base_y);
+                id(mario_anim_state) = 0;
+                id(mario_anim_tick)  = 0;
+              }
+              break;
+          }
+
+          id(matrix_display).update();
+
+  - interval: 410ms
+    id: zombie_animation
+    then:
+      - lambda: |-
+          if (id(page_no) != 2) return;   // only run on Minecraft page
+
+          id(zombie_offset) += id(zombie_dir);
+
+          // Clamp and reverse at ends (range: 0 → -4 → 0)
+          if (id(zombie_offset) <= -4) {
+            id(zombie_offset) = -4;
+            id(zombie_dir) = +1;
+          } else if (id(zombie_offset) >= 0) {
+            id(zombie_offset) = 0;
+            id(zombie_dir) = -1;
+          }
+
+          id(matrix_display).update();
+
+  - interval: 500ms
+    id: rotation_reaction
+    then:
+      - lambda: |-
+          static bool laid = false;
+          static bool faced_down = false;
+          static bool volume_adjusting = false;
+          float x = id(accel_z).state;
+          float y = id(accel_y).state;
+          int current_page = id(page_no);
+
+          if (isnan(x) || isnan(y)) return;
+
+          // Volume control by Y tilt
+          if (y > 0.21) {
+            id(side_lifted) = true;
+            volume_adjusting = true;
+            id(matrix_display).show_page(id(volume_page));
+            id(speaker_volume_up).execute();
+            id(matrix_display).update();
+          } else if (y < -0.21) {
+            id(side_lifted) = true;
+            volume_adjusting = true;
+            id(matrix_display).show_page(id(volume_page));
+            id(speaker_volume_down).execute();
+            id(matrix_display).update();
+          } else if (volume_adjusting && y < 0.07 && y > -0.07) {
+            id(side_lifted) = false;
+            volume_adjusting = false;
+
+            if (current_page == 1) {
+              id(matrix_display).show_page(id(mario_page));
+            } else if (current_page == 2) {
+              id(matrix_display).show_page(id(minecraft_page));
+            } else if (current_page == 3) {
+              id(matrix_display).show_page(id(network_page));
+            }
+          
+            id(matrix_display).update();
+          }
+          
+          //Screen is laid facing up.
+          //if (isnan(x)) return;
+          if (!laid && x < -0.65) {
+            id(screen_laid) = true;
+            laid = true;
+            
+            ESP_LOGI("ROTATE", "=== Screen is down ===");
+            id(matrix_display).show_page(id(network_page));
+            // Turn on backlight
+            auto call = id(matrix_backlight).turn_on();
+            call.perform();
+            id(matrix_display).update();
+          }
+
+          // Back to standing screen
+          if ((laid || faced_down) && x < 0.13 && x > -0.65) {
+            id(screen_laid) = false;
+            id(screen_faced_down) = false;
+            faced_down = false;
+            laid = false;
+            ESP_LOGI("ROTATE", "=== Screen is up ===");
+            id(mario_anim_state) = 0;
+            id(mario_anim_tick)  = 0;
+            id(mario_y)          = id(mario_base_y);
+            
+            if (current_page == 1) {
+              id(matrix_display).show_page(id(mario_page));
+            }
+            else if (current_page == 2) {
+              id(matrix_display).show_page(id(minecraft_page));
+            }
+            else if (current_page == 3) {
+              id(matrix_display).show_page(id(network_page));
+            }
+            // Turn on backlight
+            auto call = id(matrix_backlight).turn_on();
+            call.perform();
+            id(exit_privacy_mode).execute();
+            id(matrix_display).update();
+          } 
+
+          //privacy mode - faced down
+          if (!faced_down && x > 0.7) {
+            id(screen_faced_down) = true;
+            faced_down = true;
+            ESP_LOGI("ROTATE", "=== Screen is facing down ===");
+            
+            id(enter_privacy_mode).execute();
+            id(matrix_display).update();
+            return;
+          }
+
+  - interval: 100ms
+    then:
+      - lambda: |
+          if (!id(global_is_timer_active) && !id(global_is_timer)) {
+            if (id(page_no) == 1 || id(page_no) == 2) {  // only tick on content pages
+              id(marquee_offset) = (id(marquee_offset) + 1) % 64;
+            }
+          }
+          id(matrix_display).update();
+
+output:
+  - platform: gpio
+    pin: GPIO11
+    id: pa_ctrl
+    # Output that bridges the light entity to the display
+
+  - platform: template
+    id: matrix_brightness_output
+    type: float
+    write_action:
+      - lambda: |-
+          if (state == 0) {
+            id(matrix_display).set_brightness(0);
+          } else {
+            int brightness = id(sunstate).is_above_horizon() 
+              ? ${day_brightness} 
+              : ${night_brightness};
+            id(matrix_display).set_brightness(brightness);
+          }
+i2c:
+  - id: i2c_adc_dac
+    #this is shared by SHTC3, QMI8658, and RTC
+    sda: GPIO47
+    scl: GPIO48
+    scan: false
+    # Raw register access to the ES8311 for the Speaker Gain boost (esp_codec_dev
+    # owns the codec in TDM mode; we layer the boost on top of its DAC volume reg).
+i2c_device:
+  - id: es8311_raw
+    i2c_id: i2c_adc_dac
+    address: 0x18
+
+# ===============================================================================
+# Audio: Aec + Espressif-backed ESP Audio Stack
+#type + mode	| AEC Engine	           | CPU (Core 0)	| MWW Compatible	|    Use Case
+#sr+low_cost  |	esp_aec3 (linear, SIMD)|   ~23%       |	Yes (10/10)	    |    VA + MWW 
+# ================================================================================
+esp_aec:
+  id: aec_processor
+  sample_rate: 16000
+  filter_length: 4
+  mode: sr_low_cost
+
+esp_audio_stack:
+  id: audio_stack
+  processor_id: aec_processor
+
+  i2s_lrclk_pin: GPIO38
+  i2s_bclk_pin: GPIO43
+  i2s_mclk_pin: GPIO12
+  i2s_din_pin: GPIO39
+  i2s_dout_pin: GPIO21
+  sample_rate: 48000
+  output_sample_rate: 16000
+  slot_bit_width: 16  # 16-bit TDM slots x4
+  bits_per_sample: 16
+
+  task_core: 0
+  task_priority: 19
+  task_stack_size: 8192
+  buffers_in_psram: true
+  audio_task_stack_in_psram: true
+
+  correct_dc_offset: true
+
+  num_channels: 2 #Physical TX bus channel count on STD I2S: 1 or 2. Full-duplex codec-reference profiles often use 2 even while the public speaker stream remains mono.
+  tx_channel: left
+  codec:
+    i2c_id: i2c_adc_dac
+    input:
+      type: es7210
+      address: 0x40
+      mic_selected: 0x0F
+      gain_db: 24.0        # mic PGA
+      ref_channel: 2       # MIC3 = the DAC loopback channel
+      ref_gain_db: 0.0     # unity PGA
+    output:
+      type: es8311
+      address: 0x18
+      use_mclk: true
+      no_dac_ref: true
+  # mic config 
+  use_tdm_reference: true
+  tdm_total_slots: 4    
+  tdm_mic_slots: [0,2]  # working
+  tdm_ref_slot: 1       # Verified playback reference for AEC
+
+  aec_reference: previous_frame
+
+# Keep the FLAC decoder's working buffers out of internal RAM — it allocates
+# on every TTS response, exactly when AEC + wake word + LVGL are all live.
+audio:
+  codecs:
+    flac:
+      buffer_memory: psram
+
+microphone:
+  - platform: esp_audio_stack
+    id: box_mic
+    esp_audio_stack_id: audio_stack  
+
+speaker:
+  - platform: esp_audio_stack
+    id: box_speaker
+    esp_audio_stack_id: audio_stack
+    sample_rate: 48000
+    bits_per_sample: 16
+    num_channels: 1
+    buffer_duration: 125ms
+    #timeout: never               # Use "never" only for always-on raw streams
+
+  # Virtual speakers to combine the announcement and media streams together into one output
+  - id: mixing_speaker
+    platform: mixer
+    output_speaker: box_speaker
+    num_channels: 1
+    task_stack_in_psram: true
+    source_speakers:
+      - id: tts_speaker_mix
+        timeout: 10s
+        buffer_duration: 125ms
+      - id: media_speaker_mix
+        timeout: 10s
+        buffer_duration: 100ms
+  # Vritual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
+  - platform: resampler
+    id: tts_speaker
+    output_speaker: tts_speaker_mix
+    sample_rate: 48000
+    task_stack_in_psram: true
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_speaker_mix
+    sample_rate: 48000
+    task_stack_in_psram: true
+
+media_player:
+  - platform: sendspin
+    id: sendspin_group_media_player
+  - platform: speaker
+    name: None
+    id: speaker_media_player
+    # media pipeline (instead of parking it half-owned) so TTS and timer
+    # alarms can take the speaker graph while a stream is paused.
+    pause_releases_pipeline: true
+    volume_min: 0.2
+    volume_max: 0.7
+    volume_initial: 0.6
+    buffer_size: 131072
+    task_stack_in_psram: true
+    media_pipeline:
+      #used in music assistant.
+      speaker: media_resampling_speaker
+      sample_rate: 48000
+      format: MP3
+    announcement_pipeline:
+      speaker: tts_speaker
+      format: FLAC
+      sample_rate: 48000
+    files:
+      - id: timer_finished_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+      - id: mario_sound_main
+        file: /config/esphome/sound/super_mario_opening.flac
+      - id: wake_word_triggered_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/wake_word_triggered.flac
+      
+    on_play:
+      - lambda: |-
+          using S = media_player::MediaPlayerState;
+          // Music started during a VA turn and we didn't have music before → HA started something new
+          if (id(va).is_running() && !id(speaker_was_playing)) {
+            ESP_LOGI("post_va_media", "Media started during VA turn, flagging for post-VA resume");
+            id(g_media_started_during_va) = true;
+          }
+      - script.execute: update_status
+    
+    on_pause:
+      - script.execute: update_status
+    on_announcement:
+      # Stop the wake word (mWW or VA) if the mic is capturing
+      - if:
+          condition:
+            - microphone.is_capturing:
+          then:
+            - script.execute: stop_wake_word
+            # Ensure VA stops before moving on
+            - if:
+                condition:
+                  - lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+                then:
+                  - wait_until:
+                      - not:
+                          voice_assistant.is_running:
+      # Since VA isn't running, this is user-intiated media playback. Draw the mute display
+      - if:
+          condition:
+            and:
+              - media_player.is_announcing:
+                  id: speaker_media_player
+              - not:
+                  voice_assistant.is_running:
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+      - script.execute: update_status
+
+    on_idle:
+      #- lambda: id(speaker_was_playing) = false;   # ← add this line
+      # Since VA isn't running, this is the end of user-intiated media playback. Restart the wake word.
+      - delay: 150ms
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - script.execute: start_wake_word
+            - script.execute: set_idle_or_mute_phase
+            - script.execute: update_status
+    #used to resume music playing
+    on_state:
+      if:
+        condition:
+          and:
+            - switch.is_off: timer_ringing
+            - not:
+                voice_assistant.is_running:
+            - not:
+                media_player.is_announcing: speaker_media_player
+        then:
+          - script.execute: deferred_media_resume
+
+voice_assistant:
+  id: va
+  microphone: box_mic
+  media_player: speaker_media_player
+  micro_wake_word: mww
+  use_wake_word: false
+  noise_suppression_level: 1
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+  # When the voice assistant starts: pause audio.
+
+  on_listening:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
+    - logger.log:
+        tag: va
+        format: "VA: on_listening"
+    - globals.set:
+        id: g_va_state
+        value: "1"
+    - globals.set:
+        id: g_va_turn_id        # ← new global turn ID, increments each turn
+        value: !lambda 'return id(g_va_turn_id) + 1;'
+    # Clear the speaker-paused flag set by global_cancel. Without this, the wake-chime
+    # plus subsequent TTS would play through the paused TX path and only produce silence.
+    - lambda: id(box_speaker).set_pause_state(false);
+    - lambda: id(user_cancelled) = false;
+    # A turn is starting — any deferred barge-in restart is moot now. Clearing
+    # here keeps a stale flag (e.g. from a turn whose on_end never consumed it)
+    # from spawning a surprise extra turn after some later, unrelated turn.
+    - lambda: id(pending_wake_restart).clear();
+    - globals.set:
+        id: g_mww_recent
+        value: "0"
+    - globals.set:
+        id: g_barge_in_pending
+        value: "0"
+    - script.stop: mww_failsafe
+    #- script.stop: barge_failsafe
+    - script.execute: update_status
+    - media_player.speaker.play_on_device_media_file:
+        media_file: wake_word_triggered_sound
+        announcement: true
+        id: speaker_media_player
+  on_stt_vad_end:
+    - logger.log:
+        tag: va
+        format: "VA: on_stt_vad_end (thinking)"
+    - globals.set:
+        id: g_va_state
+        value: "2"
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: update_status
+
+  on_stt_end:
+    - script.execute: draw_display
+
+  on_tts_start:
+    - logger.log:
+        tag: va
+        format: "VA: on_tts_start (speaking)"
+    - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+    - globals.set:
+        id: g_va_state
+        value: "3"
+    - script.execute: update_status
+
+  on_end:
+    # Branch tracer — INFO so it survives the production log level.
+    - logger.log:
+        tag: barge
+        level: INFO
+        format: "on_end > pending='%s' announcing=%d va_running=%d"
+        args:
+          - id(pending_wake_restart).c_str()
+          - 'id(speaker_media_player)->state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING'
+          - 'id(va).is_running()'
+    - script.execute: #barge_log
+        id: barge_log
+        msg: !lambda |-
+          char b[64];
+          snprintf(b, sizeof(b), "end p=%s announcing=%d voice_assistant=%d",
+                   id(pending_wake_restart).empty() ? "-" : id(pending_wake_restart).c_str(),
+                   (int) (id(speaker_media_player)->state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING),
+                   (int) id(va).is_running());
+          return std::string(b);
+    
+    - lambda: |-
+        // Snapshot the turn id so the delayed cleanup can detect a new turn started
+        id(g_end_turn_snapshot) = id(g_va_turn_id);
+    - delay: 150ms     # ← let a continuing turn's on_listening preempt us
+    - if:
+        condition:
+          lambda: 'return id(g_va_turn_id) == id(g_end_turn_snapshot);'
+        then:
+          # No new turn started — this really is the end
+          - script.execute: va_end_handler
+          - script.execute: media_started_by_va
+          - script.execute: update_status
+          - globals.set:
+              id: g_va_state
+              value: "0"
+          - if:
+              condition:
+                lambda: 'return id(speaker_was_playing);'
+              then:
+                - script.execute: deferred_media_resume
+        else:
+          - logger.log:
+              tag: va
+              level: INFO
+              format: "on_end: new turn started, skipping cleanup"
+
+  on_error:
+    - logger.log:
+        tag: va
+        format: "VA: on_error (code=%s, msg=%s)"
+        args: ['code.c_str()', 'message.c_str()']
+    # If a barge-in is in flight, don't clobber the pending restart with
+    # an error state — let on_end handle the restart.
+    - if:
+        condition:
+          lambda: 'return id(g_barge_in_pending) != 0;'
+        then:
+          - logger.log:
+              tag: va
+              format: "VA: error during barge-in, keeping barge flag"
+        else:
+          - globals.set:
+              id: g_mww_recent
+              value: "0"
+          - if:
+              condition:
+                lambda: 'return !id(init_in_progress);'
+              then:
+                - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+                - globals.set:
+                    id: g_va_state
+                    value: "4"  
+                - script.execute: draw_display
+                - delay: 1s
+                - globals.set:
+                    id: g_va_state
+                    value: "0"
+                - if:
+                    condition:
+                      switch.is_off: mute
+                    then:
+                      - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+                    else:
+                      - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+
+          - script.execute: update_status
+  on_client_connected:
+    - logger.log:
+        tag: va
+        format: "VA: client connected"
+    - lambda: id(init_in_progress) = false;
+    - script.execute: start_wake_word
+    - script.execute: set_idle_or_mute_phase
+    - script.execute: draw_display
+
+  on_client_disconnected:
+    - script.execute: stop_wake_word
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
+    - script.execute: draw_display
+
+  # ── Timer events ────────────────────────────────────────────────────────
+  on_timer_started:
+    - script.execute: draw_display
+  on_timer_cancelled:
+    - script.execute: draw_display
+  on_timer_updated:
+    - script.execute: draw_display
+  on_timer_tick:
+    - script.execute: draw_display
+
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+    - component.update: matrix_display
+    - wait_until:
+        media_player.is_announcing:
+          id: speaker_media_player
+    - lambda: id(voice_assistant_phase) = ${voice_assist_timer_finished_phase_id};
+    - script.execute: draw_display
+
+micro_wake_word:
+  id: mww
+  stop_after_detection: false
+  microphone: box_mic
+  models:
+    - hey_jarvis
+  vad:
+    probability_cutoff: 0.20
+    sliding_window_size: 1
+  on_wake_word_detected:
+    - logger.log:
+        tag: mww
+        level: INFO   # default is DEBUG, which the global INFO level compiles out
+        format: "MWW fired: %s"
+        args:
+          - 'wake_word.c_str()'
+    - globals.set:
+        id: g_mww_recent
+        value: "1"
+    - script.execute: update_status
+    - script.execute: mww_failsafe
+    - if:
+        condition:
+          or:
+            - voice_assistant.is_running:
+            - lambda: 'return id(g_barge_in_pending) != 0;'
+        then:
+          - logger.log:
+              tag: mww
+              format: "MWW: barge-in, stopping VA"
+          - globals.set:
+              id: g_barge_in_pending
+              value: "1"
+          - script.execute: barge_failsafe
+          - voice_assistant.stop:
+          - media_player.stop:
+              id: speaker_media_player
+              announcement: true
+    # Duck media speaker volume if playing music
+    - if:  #ducking volume
+        condition:
+          lambda: |-
+            using S = media_player::MediaPlayerState;
+            bool music_active = (id(speaker_media_player).state == S::MEDIA_PLAYER_STATE_PLAYING)
+                             && (id(speaker_media_player).state != S::MEDIA_PLAYER_STATE_ANNOUNCING);
+            if (music_active) id(speaker_was_playing) = true;
+            return music_active;
+        then:
+          - if:
+              condition:
+                lambda: 'return id(g_ducking_active) == 0;'
+              then:
+                - mixer_speaker.apply_ducking:
+                    id: media_speaker_mix
+                    decibel_reduction: 20
+                    duration: 200ms
+                - globals.set:
+                    id: g_ducking_active
+                    value: "1"
+           
+    - if:
+        condition:
+          or:
+            - voice_assistant.is_running:
+            - and:
+                - media_player.is_announcing:
+                    id: speaker_media_player
+                - lambda: 'return !id(user_cancelled);'
+        then:
+          - if:
+              condition:
+                lambda: 'return wake_word != "Stop";'
+              then:
+                - lambda: |-
+                    id(pending_wake_restart) = wake_word;
+                    id(pending_set_ms) = millis();
+
+          - if:
+              condition:
+                lambda: 'return !id(user_cancelled);'
+              then:
+                - script.execute: global_cancel
+          - if:
+              condition:
+                and:
+                  - lambda: 'return !id(pending_wake_restart).empty();'
+                  - not:
+                      voice_assistant.is_running:
+              then:
+                - voice_assistant.start:
+                    wake_word: !lambda return id(pending_wake_restart);
+                - lambda: id(pending_wake_restart).clear();
+        else:
+          # Idle: only the activation word starts a new turn.
+          # 'Stop' while idle is a no-op (logged above) so it cannot summon the assistant.
+          - if:
+              condition:
+                lambda: 'return wake_word != "Stop";'
+              then:
+                - voice_assistant.start:
+                    wake_word: !lambda return wake_word;  
+
+
+script:
+  - id: update_clock
+    then:
+      - component.update: matrix_display
+
+  - id: play_mario_sound
+    then:
+      - media_player.speaker.play_on_device_media_file:
+          media_file: mario_sound_main
+          announcement: true
+          id: speaker_media_player
+
+  - id: select_display_page
+    then:
+      - lambda: |-
+          if (id(display_page).state == "Mario") {
+            id(matrix_display).show_page(id(mario_page));
+          } else if (id(display_page).state == "Minecraft") {
+            id(matrix_display).show_page(id(minecraft_page));
+          } else if (id(display_page).state == "Network") {
+            id(matrix_display).show_page(id(network_page));
+          }
+      - component.update: matrix_display
+
+  - id: draw_display
+    then:
+      - lambda: |
+          // Define strip colors and pattern per voice_assistant_phase
+          // Rows 30-31 (bottom 2 pixels of 32-row display)
+          const int strip_y = 30;
+          const int width = 64;
+          const int segment = 8; // length of each colored segment in marquee
+          // --- Timer takes priority over marquee ---
+          id(check_if_timers_active).execute();
+          id(check_if_timers).execute();
+          if (id(global_is_timer_active) || id(global_is_timer)) {
+            id(draw_timer_timeline).execute();
+            return;  // exit here, skip the marquee
+          }
+
+          // ── Music playing visualiser — bottom row solid black. bottom 2 rows (y=30, y=31) ──────────────
+          if ( id(page_no) == 1 || id(page_no) == 2 ){
+            for (int x = 0; x < width; x++) {
+              id(matrix_display).draw_pixel_at(x, 29, id(col_black));
+              id(matrix_display).draw_pixel_at(x, 30, id(col_black));
+              id(matrix_display).draw_pixel_at(x, 31, id(col_black));
+            }
+          }
+          using S = media_player::MediaPlayerState;
+          bool music_active = (id(speaker_media_player).state == S::MEDIA_PLAYER_STATE_PLAYING)
+                           && !(id(speaker_media_player).state == S::MEDIA_PLAYER_STATE_ANNOUNCING);
+
+          if (music_active) {
+            static uint8_t bar_h[16]   = {0};   // current height per column (0-2)
+            static uint8_t bar_tgt[16] = {0};   // target height per column
+            static uint16_t anim_tick   = 0;
+            static uint8_t lfsr          = 0xACu;
+
+            anim_tick++;
+
+            // Update targets every ~6 frames so it feels like bouncing bars
+            if ((anim_tick % 6) == 0) {
+              for (int col = 0; col < 16; col++) {
+                // cheap pseudo-random via LFSR — no stdlib rand() needed
+                lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB8u);
+                uint8_t r = lfsr ^ (col * 37) ^ (uint8_t)(anim_tick >> 2);
+                if      (r < 60)  bar_tgt[col] = 0;   // ~24% chance off
+                else if (r < 140) bar_tgt[col] = 1;   // ~31% chance 1 row
+                else              bar_tgt[col] = 2;   // ~45% chance 2 rows
+              }
+            }
+
+            // Snap heights toward targets (instant on, instant off — LED matrix
+            // has no persistence so smooth lerp would just flicker)
+            for (int col = 0; col < 16; col++) {
+              if (bar_h[col] < bar_tgt[col]) bar_h[col]++;
+              else if (bar_h[col] > bar_tgt[col]) bar_h[col]--;
+            }
+
+            // Render — 4px wide columns, 1px dark gap between each
+            for (int col = 0; col < 16; col++) {
+              // Hue cycles across columns + slowly shifts with tick for rainbow effect
+              // Colour order: red→yellow→green→cyan→blue→magenta repeating
+              uint8_t hue_idx = ((col * 4) + (anim_tick >> 3)) % 24;
+              Color bar_color;
+              if      (hue_idx <  4) bar_color = Color(255, hue_idx * 64, 0);        // red→yellow
+              else if (hue_idx <  8) bar_color = Color(255 - (hue_idx-4)*64, 255, 0); // yellow→green
+              else if (hue_idx < 12) bar_color = Color(0, 255, (hue_idx-8)*64);      // green→cyan
+              else if (hue_idx < 16) bar_color = Color(0, 255-(hue_idx-12)*64, 255); // cyan→blue
+              else if (hue_idx < 20) bar_color = Color((hue_idx-16)*64, 0, 255);     // blue→magenta
+              else                   bar_color = Color(255, 0, 255-(hue_idx-20)*64); // magenta→red
+
+              for (int px = 0; px < 3; px++) {  // 3 lit pixels, 1 gap
+                int x = col * 4 + px;
+                if (bar_h[col] >= 1) id(matrix_display).draw_pixel_at(x, 31, bar_color);
+                if (bar_h[col] >= 2) id(matrix_display).draw_pixel_at(x, 30, bar_color);
+              }
+            }
+            return;  // skip whatever else would render at the bottom
+          }
+          //marquee effect for va
+          Color color1, color2;
+          bool skip_marquee = false;
+          switch (id(voice_assistant_phase)) {
+            case ${voice_assist_listening_phase_id}:
+              // Green breathing/moving strip - listening
+              color1 = Color(20, 140, 30);
+              color2 = Color(0, 80, 0);
+              break;
+            case ${voice_assist_thinking_phase_id}:
+              // Yellow chasing - thinking
+              color1 = Color(255, 200, 0);
+              color2 = Color(80, 60, 0);
+              break;
+            case ${voice_assist_replying_phase_id}:
+              // Cyan sweep - replying
+              color1 = Color(0, 200, 255);
+              color2 = Color(0, 60, 80);
+              break;
+            case ${voice_assist_error_phase_id}:
+              // Red flash - error
+              color1 = Color(255, 0, 0);
+              color2 = Color(60, 0, 0);
+              break;
+            case ${voice_assist_muted_phase_id}:
+              // Dim orange - muted
+              color1 = Color(180, 40, 0);
+              color2 = Color(140, 10, 0);
+              break;
+            case ${voice_assist_not_ready_phase_id}:
+              // Purple - not ready
+              color1 = Color(100, 0, 150);
+              color2 = Color(30, 0, 50);
+              break;
+            case ${voice_assist_timer_finished_phase_id}:
+              // White flash - timer done
+              color1 = Color(255, 255, 255);
+              color2 = Color(60, 60, 60);
+              break;
+            default:
+              // Idle: slow Brown brick style
+              skip_marquee = true;
+              color1 = id(col_ground_fill);
+              color2 = id(col_black);
+              break;
+          }
+          //In mario page - Ground Row 29 always solid
+          if ( id(page_no) == 1){
+            
+            for (int x = 0; x < width; x++) {
+              id(matrix_display).draw_pixel_at(x, 29, id(col_ground_fill));
+            }
+            //Row 30 and 31 in either static or marquee
+            if (skip_marquee) {
+              // Draw brick strip only, no marquee
+              const int brick_y = 30;
+              const int width   = 64;
+            
+              for (int row = 0; row < 2; row++) {
+                for (int x = 0; x < width; x++) {
+                  Color c = (x % 6 == 0) ? id(col_black) : id(col_ground_fill);
+                  id(matrix_display).draw_pixel_at(x, brick_y + row, c);
+                }
+              }
+              return;
+            }
+          }
+          
+          // Minecraft page - solid dirt strip when idle
+          if (id(page_no) == 2 && skip_marquee) {
+            for (int x = 0; x < width; x++) {
+              id(matrix_display).draw_pixel_at(x, strip_y,     id(mc_dirt_dark));
+              id(matrix_display).draw_pixel_at(x, strip_y + 1, id(mc_dirt_dark));
+            }
+            return;
+          }
+
+          int offset = id(marquee_offset);
+          for (int x = 0; x < width; x++) {
+            // Create alternating segments that scroll with offset
+            int pos = (x + offset) % (segment * 2);
+            Color c = (pos < segment) ? color1 : color2;
+            id(matrix_display).draw_pixel_at(x, strip_y,     c);
+            id(matrix_display).draw_pixel_at(x, strip_y + 1, c);
+          }
+
+  - id: fetch_first_active_timer
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          auto output_timer = *timers.begin();
+          for (const auto &timer : timers) {
+            if (timer.is_active && timer.seconds_left <= output_timer.seconds_left) {
+              output_timer = timer;
+            }
+          }
+          id(global_first_active_timer) = output_timer;
+  - id: check_if_timers_active
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          bool output = false;
+          for (const auto &timer : timers) {
+            if (timer.is_active) {
+              output = true;
+            }
+          }
+          id(global_is_timer_active) = output;
+  - id: fetch_first_timer
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          auto output_timer = *timers.begin();
+          for (const auto &timer : timers) {
+            if (timer.seconds_left <= output_timer.seconds_left) {
+              output_timer = timer;
+            }
+          }
+          id(global_first_timer) = output_timer;
+  - id: check_if_timers
+    then:
+      - lambda: |
+          const auto &timers = id(va).get_timers();
+          bool output = false;
+          for (const auto &timer : timers) {
+            if (timer.is_active) {
+              output = true;
+            }
+          }
+          id(global_is_timer) = output;    
+
+  - id: draw_timer_timeline
+    then:
+      - lambda: |
+          id(check_if_timers_active).execute();
+          id(check_if_timers).execute();
+          if (id(global_is_timer_active)) {
+            id(fetch_first_active_timer).execute();
+            int active_pixels = round( 64.0 * id(global_first_active_timer).seconds_left / max(id(global_first_active_timer).total_seconds, static_cast<uint32_t>(1)) );
+            // Clear the row first
+            for (int x = 0; x < 64; x++) {
+              id(matrix_display).draw_pixel_at(x, 29, Color::BLACK);
+            }
+            // Draw progress in active color
+            for (int x = 0; x < active_pixels; x++) {
+              id(matrix_display).draw_pixel_at(x, 29, id(active_timer_color));
+            }
+          } else if (id(global_is_timer)) {
+            id(fetch_first_timer).execute();
+            int active_pixels = round( 64.0 * id(global_first_timer).seconds_left / max(id(global_first_timer).total_seconds, static_cast<uint32_t>(1)) );
+            // Clear the row first
+            for (int x = 0; x < 64; x++) {
+              id(matrix_display).draw_pixel_at(x, 29, Color::BLACK);
+            }
+            // Draw progress in paused color
+            for (int x = 0; x < active_pixels; x++) {
+              id(matrix_display).draw_pixel_at(x, 29, id(paused_timer_color));
+            }
+          }
+  # Set the voice assistant phase to idle or muted, depending on if the software mute switch is activated
+  - id: set_idle_or_mute_phase
+    then:
+      - if:
+          condition:
+            switch.is_off: mute
+          then:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          else:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+  - id: enter_privacy_mode
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(privacy_mode);'
+          then:
+            - lambda: |-
+                id(privacy_mode) = true;
+                id(privacy_music_was_playing) = id(study_room_speaker_state).state == "playing";
+            - homeassistant.action:
+                action: media_player.volume_mute
+                data:
+                  entity_id: ${speaker_in_ma}
+                  is_volume_muted: "true"
+
+            - if:
+                condition:
+                  lambda: |-
+                    return id(privacy_music_was_playing);
+                then:
+                  - homeassistant.action:
+                      action: media_player.media_pause
+                      data:
+                        entity_id: ${speaker_in_ma}
+
+            - lambda: |-
+                auto call = id(matrix_backlight).turn_off();
+                call.perform();
+
+  - id: exit_privacy_mode
+    then:
+      - if:
+          condition:
+            lambda: 'return id(privacy_mode);'
+          then:
+            - lambda: |-
+                id(privacy_mode) = false;
+
+            - homeassistant.action:
+                action: media_player.volume_mute
+                data:
+                  entity_id: ${speaker_in_ma}
+                  is_volume_muted: "false"
+
+            - if:
+                condition:
+                  lambda: 'return id(privacy_music_was_playing);'
+                then:
+                  - homeassistant.action:
+                      action: media_player.media_play
+                      data:
+                        entity_id: ${speaker_in_ma}
+
+                  - lambda: |-
+                      id(privacy_music_was_playing) = false;
+
+            - lambda: |-
+                auto call = id(matrix_backlight).turn_on();
+                call.perform();
+  
+  - id: speaker_volume_up
+    mode: restart
+    then:
+      - lambda: |-
+          id(speaker_volume_target) += 0.03;
+          if (id(speaker_volume_target) > 1.0) {
+            id(speaker_volume_target) = 1.0;
+          }
+
+          auto call = id(speaker_media_player).make_call();
+          call.set_volume(id(speaker_volume_target));
+          call.perform();
+
+  - id: speaker_volume_down
+    mode: restart
+    then:
+      - lambda: |-
+          id(speaker_volume_target) -= 0.03;
+          if (id(speaker_volume_target) < 0.0) {
+            id(speaker_volume_target) = 0.0;
+          }
+
+          auto call = id(speaker_media_player).make_call();
+          call.set_volume(id(speaker_volume_target));
+          call.perform();
+  - id: apply_speaker_gain
+    mode: queued
+    max_runs: 2
+    then:
+      - lambda: |-
+          float db = id(speaker_gain).state;
+          if (isnan(db)) db = 6.0f;
+          db = std::max(0.0f, std::min(12.0f, db));
+          const int delta = (int) lroundf(db * 2.0f);
+          uint8_t reg = 0;
+          if (!id(es8311_raw).read_byte(0x32, &reg)) return;
+          int base;
+          if (id(gain_last_written) >= 0 && reg == (uint8_t) id(gain_last_written)) {
+            base = id(gain_base);   // untouched since our last write
+          } else {
+            base = reg;             // codec rewrote the register: new base
+          }
+          int target = base + delta;
+          if (target > 255) target = 255;
+          if ((uint8_t) target != reg) {
+            id(es8311_raw).write_byte(0x32, (uint8_t) target);
+          }
+          id(gain_base) = base;
+          id(gain_last_written) = target;
+  # On-device forensic trail for the barge-in machinery
+  - id: barge_log
+    parameters:
+      msg: string
+    then:
+      - lambda: |-
+          std::string s = id(barge_trail).has_state() ? id(barge_trail).state : "";
+          if (s.length() > 170) s = s.substr(s.length() - 170);
+          if (!s.empty()) s += " | ";
+          s += msg;
+          id(barge_trail).publish_state(s);
+
+  - id: boost_mww_priority
+    mode: restart
+    then:
+      - delay: 1s
+      - lambda: |-
+          TaskHandle_t mww_task = xTaskGetHandle("mww");
+          if (mww_task) {
+            vTaskPrioritySet(mww_task, 8);
+          }
+
+  - id: global_cancel
+    then:
+      - lambda: id(user_cancelled) = true;
+      - voice_assistant.stop:
+      - media_player.stop:
+          announcement: true
+          id: speaker_media_player
+      - media_player.stop: speaker_media_player
+      - lambda: |-
+          id(box_speaker).set_pause_state(true);
+          id(audio_stack).stop_speaker();
+      - switch.turn_off: timer_ringing
+
+      # When a barge-in restart is pending (second activation word), go straight
+      # to the LISTENING visuals — the restart lands a few hundred ms later and
+      # the screen should never flash the idle page between the two turns.
+      # Cancel-only paths (Stop, touch) keep the idle/mute page as before.
+      - if:
+          condition:
+            lambda: 'return id(pending_wake_restart).empty();'
+          then:
+            - script.execute: set_idle_or_mute_phase
+          else:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
+      - script.execute: update_status
+   
+  - id: barge_failsafe
+    mode: restart
+    then:
+      - delay: 15s
+      - if:
+          condition:
+            lambda: 'return id(g_barge_in_pending) != 0;'
+          then:
+            - logger.log:
+                level: WARN
+                format: "Barge failsafe: clearing stuck g_barge_in_pending"
+            - globals.set:
+                id: g_barge_in_pending
+                value: "0"
+            - script.execute: update_status
+  #  # Core scripts -  voice assistant duplex
+                
+  # Starts either mWW or the streaming wake word, depending on the configured location
+  - id: start_wake_word
+    then:
+      # MWW owns the microphone consumer and starts the AFE/I2S path. Do not
+      # start it from early boot or generic API callbacks; wait for init to
+      # clear and make every caller pass through this single gate.
+      - wait_until:
+          condition:
+            lambda: 'return millis() >= 10000;'
+          timeout: 10s
+      - delay: 2s
+      - if:
+          condition:
+            and:
+              # run only if none met: initializing, ota in progress, wake word not enabled, mute,
+              #va running, wake word running, media player announcing, ww is on device.
+              - lambda: 'return !id(init_in_progress);'
+              - lambda: 'return !id(g_ota_in_progress);'
+              - switch.is_off: mute
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  micro_wake_word.is_running:
+              - not:
+                  media_player.is_announcing:
+                    id: speaker_media_player
+              - lambda: return id(wake_word_engine_location).state == "On device";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - micro_wake_word.start:
+            - globals.set:
+                id: g_mww_running
+                value: "true"
+            - delay: 1s
+            - lambda: |-
+                TaskHandle_t mww_task = xTaskGetHandle("mww");
+                if (mww_task) {
+                  vTaskPrioritySet(mww_task, 8);
+                }
+            - logger.log:
+                tag: mww
+                format: "MWW: safe start"
+          else:
+            - logger.log:
+                level: INFO
+                tag: mww
+                format: "MWW: safe start skipped init=%d ota=%d mute=%d va=%d mww=%d announcing=%d"
+                args:
+                  - id(init_in_progress)
+                  - id(g_ota_in_progress)
+                  - id(mute).state
+                  - id(va).is_running()
+                  - id(mww).is_running()
+                  - id(speaker_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING
+      - if:
+          condition:
+            and:
+              - not:
+                  - voice_assistant.is_running:
+              - lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+          then:
+            - lambda: id(va).set_use_wake_word(true);
+            - voice_assistant.start_continuous: # continuous wake word only supported when wake word is "In Home Assistant"
+  # Stops either mWW or the streaming wake word, depending on the configured location
+  - id: stop_wake_word
+    then:
+      - globals.set:
+          id: g_mww_running
+          value: "false"
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+          then:
+            - lambda: id(va).set_use_wake_word(false);
+            - voice_assistant.stop:
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).state == "On device";
+          then:
+            - micro_wake_word.stop:
+
+  - id: va_end_handler
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            or:
+              - media_player.is_announcing:
+                  id: speaker_media_player
+              - speaker.is_playing:
+                  id: tts_speaker
+          timeout: 2s
+      - wait_until:
+          condition:
+            and:
+              - not:
+                  media_player.is_announcing:
+                    id: speaker_media_player
+              - not:
+                  speaker.is_playing:
+                      id: tts_speaker
+          # Long replies can keep the TTS pipeline draining well after VA on_end.
+          # A short timeout here forces idle cleanup and truncates the tail.
+          timeout: 90s
+      - if:
+          condition:
+            or:
+              - media_player.is_announcing:
+                  id: speaker_media_player
+              - speaker.is_playing:
+                  id: tts_speaker
+          then:
+            - logger.log:
+                level: WARN
+                format: "VA: TTS drain timeout, forcing cleanup"
+            - media_player.stop:
+                id: speaker_media_player
+                announcement: true
+      #- delay: 100ms
+      #- voice_assistant.stop:   #this stops voice asssistant unconditionally
+      # ── give HA a window to start a continuation before we stop VA ──
+      - delay: 600ms
+      - if:
+          condition:
+            lambda: |-
+              // If VA moved into listening again (g_va_state==1) during our wait,
+              // a continuation has already taken over — don't stop it.
+              return id(g_va_state) == 1;
+          then:
+            - logger.log:
+                tag: va
+                level: INFO
+                format: "VA: continuation detected, skipping stop"
+          else:
+            - voice_assistant.stop:
+            - if:
+                condition:
+                  lambda: 'return id(g_barge_in_pending) != 0;'
+                then:
+                  - logger.log:
+                      tag: va
+                      format: "VA: barge restart"
+                  - wait_until:
+                      condition:
+                        not:
+                          voice_assistant.is_running:
+                      timeout: 2s
+                  - delay: 200ms
+                  - voice_assistant.start:
+                else:
+                  - logger.log:
+                      tag: va
+                      format: "VA: end, clearing state"
+                  - globals.set:
+                      id: g_va_state
+                      value: "0"
+                  - script.execute: update_status
+                  - script.execute: set_idle_or_mute_phase
+                  - script.execute: start_wake_word
+                  - script.execute: deferred_media_resume
+
+
+  - id: mww_failsafe
+    mode: restart
+    then:
+      - delay: 3s
+      - logger.log:
+          level: WARN
+          format: "MWW failsafe: clearing stuck g_mww_recent"
+      - globals.set:
+          id: g_mww_recent
+          value: "0"
+      - script.execute: update_status
+  - id: update_status
+    mode: restart
+    then:
+      - lambda: |-
+          // Central UI reducer. Priority order:
+          //   init/connectivity > mute states > wake-word
+          //   > VA (listening/thinking/responding) > intercom call
+          //   > VA error > media playback > idle.
+          // Device-local overlays such as timer alarm, settings pages, or
+          // "call ended" pages live in each renderer because not every full
+          // device includes those optional UI concepts.
+          // VA responding sits above intercom so concurrent TTS always shows
+          // blue even while a call is active; when TTS ends the evaluator
+          // falls back to the underlying call (green) or music (blue).
+          // Media playback target covers both STATE_PLAYING and
+          // STATE_ANNOUNCING so the LED stays blue when music pauses for a
+          // TTS announcement instead of flashing to off and back.
+          using S = media_player::MediaPlayerState;
+          auto mp_state = id(speaker_media_player).state;
+          bool media_active = (mp_state == S::MEDIA_PLAYER_STATE_PLAYING ||
+                               mp_state == S::MEDIA_PLAYER_STATE_ANNOUNCING);
+          int state = ${ui_state_idle};
+          int led = 0;
+          if (id(init_in_progress)) {
+            state = ${ui_state_init};
+          } else if (!wifi::global_wifi_component->is_connected()) {
+            state = ${ui_state_no_wifi};
+          } else if (!api::global_api_server->is_connected()) {
+            state = ${ui_state_no_ha};
+          } else if (id(g_mww_recent) || id(g_barge_in_pending)) {
+            state = ${ui_state_mww_recent};
+            led = 4;
+          } else if (id(g_va_state) == 1) {
+            state = ${ui_state_va_listening};
+            led = 5;
+          } else if (id(g_va_state) == 2) {
+            state = ${ui_state_va_thinking};
+            led = 6;
+          } else if (id(g_va_state) == 3) {
+            state = ${ui_state_va_replying};
+            led = 7;
+          }  else if (id(g_va_state) == 4) {
+            state = ${ui_state_va_error};
+            led = 11;
+          } else if (media_active) {
+            state = ${ui_state_media};
+            led = 12;
+          }
+          id(ui_state) = state;
+      - script.execute: draw_display
+      
+
+  - id: deferred_media_resume
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            not:
+              media_player.is_announcing:
+                id: speaker_media_player
+          timeout: 12s
+      - delay: 300ms
+      - if:
+          condition:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing:
+                    id: speaker_media_player
+              - lambda: |-
+                  using S = media_player::MediaPlayerState;
+                  return id(speaker_was_playing)
+                      || (id(speaker_media_player).state == S::MEDIA_PLAYER_STATE_PAUSED);
+          then:
+            - logger.log:
+                tag: media_resume
+                level: INFO
+                format: "Unducking media (was_playing=%d ducking=%d)"
+                args:
+                  - 'id(speaker_was_playing)'
+                  - 'id(g_ducking_active)'
+            - if:
+                condition:
+                  lambda: 'return id(g_ducking_active) == 1;'
+                then:
+                  - mixer_speaker.apply_ducking:
+                      id: media_speaker_mix
+                      decibel_reduction: 0
+                      duration: 500ms
+                  - globals.set:
+                      id: g_ducking_active
+                      value: "0"
+            - lambda: 'id(speaker_was_playing) = false;'
+            # ── retry loop: re-duck check every 1s for up to 5 attempts ──
+            - repeat:
+                count: 5
+                then:
+                  - delay: 1s
+                  - if:
+                      condition:
+                        lambda: 'return id(g_ducking_active) == 1;'
+                      then:
+                        - logger.log:
+                            tag: media_resume
+                            level: WARN
+                            format: "Unduck retry (ducking still active)"
+                        - if:
+                            condition:
+                              and:
+                                - not:
+                                    voice_assistant.is_running:
+                                - not:
+                                    media_player.is_announcing:
+                                      id: speaker_media_player
+                            then:
+                              - mixer_speaker.apply_ducking:
+                                  id: media_speaker_mix
+                                  decibel_reduction: 0
+                                  duration: 500ms
+                              - globals.set:
+                                  id: g_ducking_active
+                                  value: "0"
+                            else:
+                              - logger.log:
+                                  tag: media_resume
+                                  level: WARN
+                                  format: "Unduck retry skipped: va=%d announcing=%d"
+                                  args:
+                                    - 'id(va).is_running()'
+                                    - 'id(speaker_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING'
+            # ── restart MWW after unduck settles ──
+            - delay: 500ms
+            - script.execute: start_wake_word
+          else:
+            - lambda: |-
+                using S = media_player::MediaPlayerState;
+                ESP_LOGW("media_resume", "unduck skipped: was_playing=%d va=%d announcing=%d state=%d",
+                  id(speaker_was_playing),
+                  id(va).is_running(),
+                  id(speaker_media_player).state == S::MEDIA_PLAYER_STATE_ANNOUNCING,
+                  (int)id(speaker_media_player).state);
+            
+  - id: media_started_by_va
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            not:
+              media_player.is_announcing:
+                id: speaker_media_player
+          timeout: 12s
+      - wait_until:
+          condition:
+            not:
+              voice_assistant.is_running:
+          timeout: 5s
+      - delay: 800ms
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(g_media_started_during_va);'
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing:
+                    id: speaker_media_player
+              - lambda: |-
+                  return id(speaker_media_player).state
+                      == media_player::MEDIA_PLAYER_STATE_PAUSED;
+          then:
+            - logger.log:
+                tag: post_va_media
+                level: INFO
+                format: "Media was started during VA then paused by pipeline release, resuming"
+            - homeassistant.action:
+                action: media_player.media_play
+                data:
+                  entity_id: ${speaker_in_ma}
+            - lambda: 'id(g_media_started_during_va) = false;'
+          else:
+            - lambda: |-
+                ESP_LOGI("post_va_media", "No resume needed: flag=%d state=%d announcing=%d va=%d",
+                  id(g_media_started_during_va),
+                  (int)id(speaker_media_player).state,
+                  (int)(id(speaker_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING),
+                  (int)id(va).is_running());
+            - lambda: 'id(g_media_started_during_va) = false;'      
+
+switch:
+  - platform: template
+    name: Mute
+    id: mute
+    icon: "mdi:microphone-off"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_off:
+      - microphone.unmute:
+      - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+      - script.execute: draw_display
+    on_turn_on:
+      - microphone.mute:
+      - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+      - script.execute: draw_display
+
+  - platform: output
+    id: speaker_switch
+    name: "Speaker Enable"
+    output: pa_ctrl
+    restore_mode: ALWAYS_ON
+
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      # Turn off the repeat mode and disable the pause between playlist items
+      - lambda: |-
+              id(speaker_media_player)
+                ->make_call()
+                .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
+                .set_announcement(true)
+                .perform();
+              id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      # Stop playing the alarm
+      - media_player.stop:
+          id: speaker_media_player
+          announcement: true
+    on_turn_on:
+      # Turn on the repeat mode and pause for 1000 ms between playlist items/repeats
+      - lambda: |-
+            id(speaker_media_player)
+              ->make_call()
+              .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
+              .set_announcement(true)
+              .perform();
+            id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
+      #make sure volume is not too small for alarm.
+      - speaker.volume_set:
+          id: box_speaker
+          volume: 60%
+
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_sound
+          announcement: true
+      ##play for 30s.
+      - delay: 30s
+      - switch.turn_off: timer_ringing
+
+  - platform: template
+    id: local_media_mute
+    icon: 'mdi:volume-off'
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      then:
+        - homeassistant.action:
+            action: media_player.volume_set
+            data:
+              entity_id: media_player.speaker_media_player
+              volume_level: "0"
+    on_turn_off:
+      - homeassistant.action:
+          action: media_player.volume_set
+          data:
+            entity_id: media_player.speaker_media_player
+            volume_level: !lambda 'return id(local_volume_value);'
+  # Runtime AEC on/off (packages/esp_audio_stack/aec_controls.yaml). Restores
+  # ON — leave it on for normal use, barge-in ('Stop' during TTS) depends on it.
+  - platform: esp_audio_stack
+    esp_audio_stack_id: audio_stack
+    aec:
+      id: aec_switch
+      name: Echo Cancellation
+      icon: mdi:ear-hearing
+      restore_mode: RESTORE_DEFAULT_OFF
+
+# Light entity exposed to Home Assistant
+light:
+  - platform: monochromatic
+    name: "Matrix Display Backlight"
+    id: matrix_backlight
+    output: matrix_brightness_output
+    default_transition_length: 0s
+    restore_mode: RESTORE_DEFAULT_ON
+
+display:
+  - platform: hub75
+    id: matrix_display
+    clock_speed: 16MHZ
+    board: adafruit-matrix-portal-s3
+    shift_driver: ICN2038S
+    double_buffer: True  #This stops the whole screen flicking when animation.
+    panel_width: 64
+    panel_height: 32
+    brightness: ${day_brightness}
+    bit_depth: 5
+    update_interval: 33ms
+    scan_wiring: STANDARD_TWO_SCAN
+    #Pins color.
+    r1_pin: GPIO4
+    g1_pin: GPIO6
+    b1_pin: GPIO5
+    r2_pin: GPIO7
+    g2_pin: GPIO16
+    b2_pin: GPIO15
+    a_pin: GPIO18
+    b_pin: GPIO8
+    c_pin: GPIO3
+    d_pin: GPIO42
+    e_pin: GPIO9
+    clk_pin: GPIO41
+    oe_pin: GPIO2
+    lat_pin: GPIO40
+    pages:
+      - id: mario_page
+        lambda: |-
+          // Sky color
+            bool day = id(sunstate).is_above_horizon();
+
+            if (day) {
+              it.fill(id(col_sky));  // daytime sky
+            } else {
+              it.fill(id(col_black));  // black night sky
+            }
+            auto now = id(sntp_time).now();
+            if (!now.is_valid()) {
+              it.print(4, 10, id(TickingTimebomb), "Syncing ...");
+              return;
+            }
+            // ===== BUSH1 =====
+            it.filled_circle(19, 29, 3, id(col_bush));
+            it.filled_circle(23, 26, 3, id(col_bush));
+            it.filled_circle(25, 29, 3, id(col_bush));
+            it.filled_circle(27, 29, 3, id(col_bush));
+            
+            // ================= PIPE (8x7)
+            int pix = id(pipe_x);
+            int piy = id(pipe_y);
+            // Top-left corner of pipe:
+            int x0 = pix - 5;
+            int y0 = piy - 11;
+            // ----- PIPE Row 1 -----
+            for (int x = 0; x < 8; x++)
+              it.draw_pixel_at(x0+x, y0+1, id(col_black));
+            
+            // ----- PIPE Row 2 -----
+            it.draw_pixel_at(x0+0, y0+2, id(col_black));
+            it.draw_pixel_at(x0+1, y0+2, id(col_green));
+            it.draw_pixel_at(x0+2, y0+2, id(col_green));
+            it.draw_pixel_at(x0+3, y0+2, id(col_green));
+            it.draw_pixel_at(x0+4, y0+2, id(col_green));
+            it.draw_pixel_at(x0+5, y0+2, id(col_green));
+            it.draw_pixel_at(x0+6, y0+2, id(col_green));
+            it.draw_pixel_at(x0+7, y0+2, id(col_black));
+            
+            // ----- Row 4 -----
+            it.draw_pixel_at(x0+0, y0+3, id(col_black));
+            it.draw_pixel_at(x0+1, y0+3, id(col_green));
+            it.draw_pixel_at(x0+2, y0+3, id(col_green));
+            it.draw_pixel_at(x0+3, y0+3, id(col_green));
+            it.draw_pixel_at(x0+4, y0+3, id(col_green));
+            it.draw_pixel_at(x0+5, y0+3, id(col_green));
+            it.draw_pixel_at(x0+6, y0+3, id(col_green));
+            it.draw_pixel_at(x0+7, y0+3, id(col_black));
+            
+            // ----- Row 5 -----
+            for (int x = 0; x < 8; x++) {
+              it.draw_pixel_at(x0+x, y0+4, id(col_black));
+            }
+            
+            // ----- Rows 6–9 (pipe stem) -----
+            for (int y = 5; y <= 8; y++) {
+              it.draw_pixel_at(x0+1, y0+y, id(col_black));
+              it.draw_pixel_at(x0+2, y0+y, id(col_green));
+              it.draw_pixel_at(x0+3, y0+y, id(col_green));
+              it.draw_pixel_at(x0+4, y0+y, id(col_green));
+              it.draw_pixel_at(x0+5, y0+y, id(col_green));
+              it.draw_pixel_at(x0+6, y0+y, id(col_black));
+            }
+
+            // ===== QUESTION BLOCK =====
+            int block_base_y = id(mario_base_y) - 14 - 9 - 1;
+            //bump up by 2 pixel
+            int block_bump = (id(mario_anim_state) == 2) ? -2 : 0;
+            int block_x0 = 2;
+            int block_y0 = block_base_y + block_bump;
+            // Gold background
+            for (int dx = 0; dx < 9; dx++)
+              for (int dy = 0; dy < 9; dy++)
+                it.draw_pixel_at(block_x0+dx, block_y0+dy, id(col_gold));
+            // top border
+            for (int i = 0; i < 9; i++)
+              it.draw_pixel_at(block_x0+i, block_y0+0, id(col_brown));
+            // bottom border
+            for (int i = 0; i < 9; i++)
+              it.draw_pixel_at(block_x0+i, block_y0+8, id(col_black));
+            // left border
+            for (int i = 1; i < 8; i++)
+              it.draw_pixel_at(block_x0+0, block_y0+i, id(col_brown));
+            // right border
+            for (int i = 1; i < 8; i++)
+              it.draw_pixel_at(block_x0+8, block_y0+i, id(col_black));
+            if (id(mario_anim_state) == 0 || id(mario_anim_state) == 1) {
+              // ? mark in brown
+              it.draw_pixel_at(block_x0+3, block_y0+2, id(col_brown));
+              it.draw_pixel_at(block_x0+4, block_y0+2, id(col_brown));
+              it.draw_pixel_at(block_x0+5, block_y0+2, id(col_brown));
+              it.draw_pixel_at(block_x0+5, block_y0+3, id(col_brown));
+              it.draw_pixel_at(block_x0+4, block_y0+4, id(col_brown));
+              it.draw_pixel_at(block_x0+4, block_y0+5, id(col_brown));
+              it.draw_pixel_at(block_x0+4, block_y0+7, id(col_brown));
+            }
+            // ===== COIN =====
+            const char COIN[7][6] = {
+              " GGG ",
+              "GWGGG",
+              "GWGYG",
+              "GWGYG",
+              "GWGYG",
+              "GWGGG",
+              " GGG "
+            };
+            // ---- draw coin helper (5x9) ----
+            auto draw_coin = [&](int COIN_X, int COIN_Y) {
+              for (int y = 0; y < 7; y++) {
+                for (int x = 0; x < 5; x++) {
+
+                  Color c;
+                  bool draw = true;
+
+                  switch (COIN[y][x]) {
+                    case 'G': c = id(col_gold);   break;
+                    case 'W': c = id(col_white);  break;
+                    case 'Y': c = id(col_orange); break;
+                    default:  draw = false;
+                  }
+
+                  if (draw) {
+                    it.draw_pixel_at(
+                      COIN_X + x,
+                      COIN_Y + y,
+                      c
+                    );
+                  }
+                }
+              }
+            };
+
+            //Draw two coins
+            //draw_coin(50, 21);
+            draw_coin(57, 13);
+
+            // ===== CLOUD1 =====
+            const int cloud1_offsets[4] = { -3, -1, 1, 3 };
+            if (day) {
+              int x_cloud1 = 26;
+              int y_cloud1 = 2;
+              it.filled_circle(x_cloud1 - 2, y_cloud1,     2, id(col_white));
+              it.filled_circle(x_cloud1,     y_cloud1 - 1, 2, id(col_white));
+              it.filled_circle(x_cloud1 + 2, y_cloud1,     2, id(col_white));
+              it.filled_rectangle(x_cloud1 - 3, y_cloud1 + 1, 6, 2, id(col_white));
+            }
+
+            
+            // --- Right: Weather icon with animation---
+
+            std::string weather_stat = id(ha_weather_state).state;
+            std::string ws;
+            if (!weather_stat.empty() || weather_stat != "unknown" || weather_stat != "unavailable") {
+                ws = weather_stat;
+                std::transform(ws.begin(), ws.end(), ws.begin(), ::tolower);
+            } else {
+                ws = "";
+            }
+
+            const char* icon = "\U000F0590";
+            Color icon_color = id(col_white);
+            bool is_rain = false;
+
+            if (weather_stat == "sunny") {
+                icon = "\U000F05A8";
+                icon_color = id(col_yellow);
+
+            } else if (ws.find("rain") != std::string::npos) {
+                icon = "\U000F0590";   // cloudy icon for rain
+                icon_color = id(col_white);
+                is_rain = true;
+
+            } else if (weather_stat == "lightning" || weather_stat == "lightning-rainy") {
+                icon = "\U000F0593";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "windy" || weather_stat == "windy-variant") {
+                icon = "\U000F059D";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "clear-night" || weather_stat == "clearnight") {
+                icon = "\U000F0594";
+                icon_color = id(col_white);
+
+            } else if (ws.find("cloud") != std::string::npos) {
+                icon = "\U000F0590";
+                icon_color = id(col_white);
+            }
+
+            // Draw icon
+            it.printf(
+                59, 3,
+                id(icon_font_9),
+                icon_color,
+                TextAlign::CENTER,
+                "%s",
+                icon
+            );
+
+            // 3 Rain drop animation overlay
+            auto draw_rain = [&](int drop_x1, int drop_start_y) {
+                int drop_x2 = drop_x1 + 2;
+                int drop_x3 = drop_x1 + 4;
+
+                uint32_t fall_dur    = 500;
+                uint32_t stagger     = fall_dur * 6 / 10;
+                uint32_t period      = stagger * 3;
+                uint32_t visible     = fall_dur * 4 / 5;
+                uint32_t drop_travel = 4;
+
+                uint32_t t = millis() % period;
+
+                auto draw_drop = [&](int x, uint32_t phase_offset) {
+                    uint32_t lt = (t + period - phase_offset) % period;
+                    if (lt < fall_dur) {
+                        int offset = (int)(lt * drop_travel) / (int)fall_dur;
+                        if (lt < visible) {
+                            it.draw_pixel_at(x, drop_start_y + offset,     id(col_white));
+                            it.draw_pixel_at(x, drop_start_y + offset + 1, id(col_white));
+                        }
+                    }
+                };
+
+                draw_drop(drop_x1, 0);
+                draw_drop(drop_x2, stagger);
+                draw_drop(drop_x3, stagger * 2);
+            };
+            
+            if (is_rain){
+              draw_rain(57, 6);
+            }
+              
+            // temperature
+            if (id(study_temp).has_state()) {
+              it.printf(55, 25, id(font_small), TextAlign::CENTER, "%.0f°C", id(study_temp).state);
+            } else {
+              it.print(55, 25, id(font_small), TextAlign::CENTER, "...");
+            }
+
+            // ==== stars twinkle at night===
+            if (!day) {
+              int sx1 = 14;
+              int sy1 = 3;
+              int sx2 = 44;
+              int sy2 = 2;
+
+              // --- base stars (dim) ---
+              auto draw_star_small = [&](int x, int y, Color c) {
+                it.draw_pixel_at(x, y, c);
+              };
+
+              draw_star_small(sx1, sy1, id(col_white));
+              draw_star_small(sx2, sy2, id(col_white));
+
+              // --- twinkling star (bright, plus-shaped) ---
+              int x, y;
+              if (id(twinkle_index) == 0)      { x = sx1; y = sy1; }
+              else { x = sx2; y = sy2; }
+
+              it.draw_pixel_at(x,     y,     id(col_white));
+              it.draw_pixel_at(x - 1, y,     id(col_white));
+              it.draw_pixel_at(x + 1, y,     id(col_white));
+              it.draw_pixel_at(x,     y - 1, id(col_white));
+              it.draw_pixel_at(x,     y + 1, id(col_white));
+            }
+            //=== Clock Panel
+            int box_x = 16;
+            int box_y = 5;
+            int box_w = 39;
+            int box_h = 16;
+            it.filled_rectangle(box_x, box_y, box_w, box_h, id(col_white));
+            it.rectangle(box_x, box_y, box_w, box_h, id(col_panel_border));
+            it.draw_pixel_at(box_x,           box_y,           id(col_black));
+            it.draw_pixel_at(box_x+box_w-1,   box_y,           id(col_black));
+            it.draw_pixel_at(box_x,           box_y+box_h-1,   id(col_black));
+            it.draw_pixel_at(box_x+box_w-1,   box_y+box_h-1,   id(col_black));    
+            // ===== TIME =====
+            char time_str[8];
+            sprintf(time_str, "%02d:%02d", now.hour, now.minute);    
+            int x1, y1, w, h;
+            it.get_text_bounds(0, 0, time_str, id(TickingTimebomb), TextAlign::TOP_LEFT, &x1, &y1, &w, &h);
+                
+            int tx = box_x + (box_w - w) / 2;
+            int ty = box_y - 1 + (box_h - h) / 2 ;
+            
+            // ===== CLOCK CLEAR AREA
+            it.filled_rectangle(box_x+1, box_y+1, box_w-2, box_h-2, id(col_white));
+                
+            it.print(tx, ty, id(TickingTimebomb), id(col_black), time_str);
+
+            // ===== MARIO =====
+            int px = id(mario_x);
+            int py = id(mario_y);    
+            // ----- Hat -----
+            // Row 0 – Hat1 top
+            it.draw_pixel_at(px-2, py-14, id(col_red));
+            it.draw_pixel_at(px-1, py-14, id(col_red));
+            it.draw_pixel_at(px,   py-14, id(col_red));
+            it.draw_pixel_at(px+1, py-14, id(col_red));
+            it.draw_pixel_at(px+2, py-14, id(col_red));
+
+            // Row 1 – Hat2 brim
+            it.draw_pixel_at(px-3, py-13, id(col_red));
+            it.draw_pixel_at(px-2, py-13, id(col_red));
+            it.draw_pixel_at(px-1, py-13, id(col_red));
+            it.draw_pixel_at(px,   py-13, id(col_red));
+            it.draw_pixel_at(px+1, py-13, id(col_red));
+            it.draw_pixel_at(px+2, py-13, id(col_red));
+            it.draw_pixel_at(px+3, py-13, id(col_red));
+            it.draw_pixel_at(px+4, py-13, id(col_red));
+            it.draw_pixel_at(px+5, py-13, id(col_red));
+
+            // ----- Head1 ----- Hair (Brown)
+            it.draw_pixel_at(px-3, py-12, id(col_brown));
+            it.draw_pixel_at(px-2, py-12, id(col_brown));
+            it.draw_pixel_at(px-1, py-12, id(col_brown));
+            // ----- Head1 ----- Face (Skin)
+            it.draw_pixel_at(px, py-12, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-12, id(col_mario_skin2));
+            // ----- Head1 ----- Eye
+            it.draw_pixel_at(px+2, py-12, id(col_black));
+            it.draw_pixel_at(px+3,   py-12, id(col_mario_skin2));
+            // ----- Head2 ----- Face (Skin)
+            it.draw_pixel_at(px-4, py-11, id(col_brown));
+            it.draw_pixel_at(px-3, py-11, id(col_mario_skin2));
+            it.draw_pixel_at(px-2, py-11, id(col_brown));
+            it.draw_pixel_at(px-1, py-11, id(col_mario_skin2));
+            it.draw_pixel_at(px,   py-11, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-11, id(col_mario_skin2));
+            // ----- Head2 ----- eye
+            it.draw_pixel_at(px+2, py-11, id(col_black));
+            it.draw_pixel_at(px+3, py-11, id(col_mario_skin2));
+            it.draw_pixel_at(px+4, py-11, id(col_mario_skin2));
+            // ----- Head3 ----- Face (Skin)
+            it.draw_pixel_at(px-4, py-10, id(col_brown));
+            it.draw_pixel_at(px-3, py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px-2, py-10, id(col_brown));
+            it.draw_pixel_at(px-1, py-10, id(col_brown));
+            it.draw_pixel_at(px,   py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px+2, py-10, id(col_mario_skin2));
+            // ----- Head3 ----- eye
+            it.draw_pixel_at(px+3, py-10, id(col_black));
+            // ----- Head3 ----- skin
+            it.draw_pixel_at(px+4, py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px+5, py-10, id(col_mario_skin2));
+            it.draw_pixel_at(px+6, py-10, id(col_mario_skin2));
+
+            // ----- Head4 ----- Face (Skin)
+            it.draw_pixel_at(px-4, py-9, id(col_brown));
+            it.draw_pixel_at(px-3, py-9, id(col_brown));
+            it.draw_pixel_at(px-2, py-9, id(col_mario_skin2));
+            it.draw_pixel_at(px-1, py-9, id(col_mario_skin2));
+            it.draw_pixel_at(px,   py-9, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-9, id(col_mario_skin2));
+            // ----- Head4 ----- mustache
+            it.draw_pixel_at(px+2, py-9, id(col_black));
+            it.draw_pixel_at(px+3, py-9, id(col_black));
+            it.draw_pixel_at(px+4, py-9, id(col_black));
+            it.draw_pixel_at(px+5, py-9, id(col_black));
+            // ----- Head5 ----- neck (Skin)
+            it.draw_pixel_at(px-2, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px-1, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px,   py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px+1, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px+2, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px+3, py-8, id(col_mario_skin2));
+            it.draw_pixel_at(px+4, py-8, id(col_mario_skin2));
+
+            // ----- Shirt1 (Red) -----
+            it.draw_pixel_at(px-3, py-7, id(col_red));
+            it.draw_pixel_at(px-2, py-7, id(col_red));
+            it.draw_pixel_at(px-1, py-7, id(col_blue));
+            it.draw_pixel_at(px,   py-7, id(col_red));
+            it.draw_pixel_at(px+1, py-7, id(col_red));
+            it.draw_pixel_at(px+2, py-7, id(col_red));
+
+            // ----- Shirt2 (Red) -----
+            it.draw_pixel_at(px-4, py-6, id(col_red));
+            it.draw_pixel_at(px-3, py-6, id(col_red));
+            it.draw_pixel_at(px-2, py-6, id(col_red));
+            it.draw_pixel_at(px-1, py-6, id(col_blue));
+            it.draw_pixel_at(px,   py-6, id(col_red));
+            it.draw_pixel_at(px+1, py-6, id(col_red));
+            it.draw_pixel_at(px+2, py-6, id(col_blue));
+            it.draw_pixel_at(px+3, py-6, id(col_red));
+            it.draw_pixel_at(px+4, py-6, id(col_red));
+            it.draw_pixel_at(px+5, py-6, id(col_red));
+
+            // ----- Shirt3 (Red) -----
+            it.draw_pixel_at(px-5, py-5, id(col_red));
+            it.draw_pixel_at(px-4, py-5, id(col_red));
+            it.draw_pixel_at(px-3, py-5, id(col_red));
+            it.draw_pixel_at(px-2, py-5, id(col_red));
+            it.draw_pixel_at(px-1, py-5, id(col_blue));
+            it.draw_pixel_at(px,   py-5, id(col_blue));
+            it.draw_pixel_at(px+1, py-5, id(col_blue));
+            it.draw_pixel_at(px+2, py-5, id(col_blue));
+            it.draw_pixel_at(px+3, py-5, id(col_red));
+            it.draw_pixel_at(px+4, py-5, id(col_red));
+            it.draw_pixel_at(px+5, py-5, id(col_red));
+            it.draw_pixel_at(px+6, py-5, id(col_red));
+
+            // ----- Shirt4 Arms (Skin) -----
+            it.draw_pixel_at(px-5, py-4, id(col_mario_skin2));
+            it.draw_pixel_at(px-4, py-4, id(col_mario_skin2));
+
+            // ----- Shirt4 Arms Overalls (Blue) -----
+            it.draw_pixel_at(px-3, py-4, id(col_red));
+            it.draw_pixel_at(px-2, py-4, id(col_blue));
+            it.draw_pixel_at(px-1, py-4, id(col_yellow));
+            it.draw_pixel_at(px, py-4, id(col_blue));
+            it.draw_pixel_at(px+1, py-4, id(col_blue));
+            it.draw_pixel_at(px+2, py-4, id(col_yellow));
+            it.draw_pixel_at(px+3, py-4, id(col_blue));
+            it.draw_pixel_at(px+4, py-4, id(col_red));
+
+            // ----- Shirt5 belly Overalls (Blue) -----
+            it.draw_pixel_at(px-5, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px-4, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px-3, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px-2, py-3, id(col_blue));
+            it.draw_pixel_at(px-1, py-3, id(col_blue));
+            it.draw_pixel_at(px, py-3, id(col_blue));
+            it.draw_pixel_at(px+1, py-3, id(col_blue));
+            it.draw_pixel_at(px+2, py-3, id(col_blue));
+            it.draw_pixel_at(px+3, py-3, id(col_blue));
+            it.draw_pixel_at(px+4, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px+5, py-3, id(col_mario_skin2));
+            it.draw_pixel_at(px+6, py-3, id(col_mario_skin2));
+
+            // ----- Shirt6 leg1 Overalls (Blue) -----
+            it.draw_pixel_at(px-5, py-2, id(col_mario_skin2));
+            it.draw_pixel_at(px-4, py-2, id(col_mario_skin2));
+            it.draw_pixel_at(px-3, py-2, id(col_blue));
+            it.draw_pixel_at(px-2, py-2, id(col_blue));
+            it.draw_pixel_at(px-1, py-2, id(col_blue));
+            it.draw_pixel_at(px, py-2, id(col_blue));
+            it.draw_pixel_at(px+1, py-2, id(col_blue));
+            it.draw_pixel_at(px+2, py-2, id(col_blue));
+            it.draw_pixel_at(px+3, py-2, id(col_blue));
+            it.draw_pixel_at(px+4, py-2, id(col_blue));
+            it.draw_pixel_at(px+5, py-2, id(col_mario_skin2));
+            it.draw_pixel_at(px+6, py-2, id(col_mario_skin2));
+
+            // ----- Shirt7 leg2 Overalls (Blue) -----
+            it.draw_pixel_at(px-3, py-1, id(col_blue));
+            it.draw_pixel_at(px-2, py-1, id(col_blue));
+            it.draw_pixel_at(px-1, py-1, id(col_blue));
+            it.draw_pixel_at(px+2, py-1, id(col_blue));
+            it.draw_pixel_at(px+3, py-1, id(col_blue));
+            it.draw_pixel_at(px+4, py-1, id(col_blue));
+
+            // ----- Shoes1 (Brown) -----
+            it.draw_pixel_at(px-4, py, id(col_brown));
+            it.draw_pixel_at(px-3, py, id(col_brown));
+            it.draw_pixel_at(px-2, py, id(col_brown));
+            it.draw_pixel_at(px+3, py, id(col_brown));
+            it.draw_pixel_at(px+4, py, id(col_brown));
+            it.draw_pixel_at(px+5, py, id(col_brown));
+            // ----- Shoes2 (Brown) -----
+            it.draw_pixel_at(px-5, py+1, id(col_brown));
+            it.draw_pixel_at(px-4, py+1, id(col_brown));
+            it.draw_pixel_at(px-3, py+1, id(col_brown));
+            it.draw_pixel_at(px-2, py+1, id(col_brown));
+
+            it.draw_pixel_at(px+3, py+1, id(col_brown));
+            it.draw_pixel_at(px+4, py+1, id(col_brown));
+            it.draw_pixel_at(px+5, py+1, id(col_brown));
+            it.draw_pixel_at(px+6, py+1, id(col_brown));
+          // Voice assistant status
+            id(draw_display).execute();
+          
+      - id: minecraft_page
+        lambda: |-
+          const int W = 64;
+          const int H = 32;
+          const int BORDER = 3;
+          const int GRASS_H = 2;
+          it.fill(Color(0, 0, 0));
+
+          // ===== DIRT BORDER =====
+          for (int x = 0; x < W; x++) {
+              for (int y = 0; y < H; y++) {
+                  bool border =
+                      x < BORDER || x >= W - BORDER ||
+                      y < BORDER || y >= H - BORDER;
+
+                  if (border) {
+                      Color c = id(mc_dirt);
+                      int n = (x * 11 + y * 7) % 10;
+                      if (n < 3)      c = id(mc_dirt_dark);
+                      else if (n > 7) c = id(mc_dirt_light);
+                      it.draw_pixel_at(x, y, c);
+                  }
+              }
+          }
+          //draw some broken walls
+          it.draw_pixel_at(61, 26, id(col_white));
+          it.draw_pixel_at(61, 27, id(col_white));
+          it.draw_pixel_at(62, 19, id(col_white));
+          it.draw_pixel_at(62, 20, id(col_white));
+          it.draw_pixel_at(62, 21, id(col_white));
+          it.draw_pixel_at(62, 22, id(col_white));
+          it.draw_pixel_at(62, 23, id(col_white));
+          it.draw_pixel_at(62, 24, id(col_white));
+          it.draw_pixel_at(62, 25, id(col_white));
+          
+          it.draw_pixel_at(63, 20, id(col_white));
+          it.draw_pixel_at(63, 21, id(col_white));
+          it.draw_pixel_at(63, 22, id(col_white));
+          it.draw_pixel_at(63, 23, id(col_white));
+          it.draw_pixel_at(63, 24, id(col_white));
+          it.draw_pixel_at(63, 25, id(col_white));
+          it.draw_pixel_at(63, 26, id(col_white));
+          it.draw_pixel_at(63, 27, id(col_white));
+          
+          it.draw_pixel_at(61, 20, id(col_white));
+          it.draw_pixel_at(61, 21, id(col_white));
+          it.draw_pixel_at(61, 22, id(col_white));
+          it.draw_pixel_at(61, 23, id(col_white));
+          it.draw_pixel_at(61, 24, id(col_white));
+          it.draw_pixel_at(61, 25, id(col_white));
+          it.draw_pixel_at(61, 26, id(col_white));
+          it.draw_pixel_at(61, 27, id(col_white));
+          it.draw_pixel_at(60, 27, id(mc_dirt_dark));
+          // ===== GRASS STRIP =====
+          for (int x = BORDER; x < W - BORDER; x++) {
+              for (int y = BORDER; y < BORDER + GRASS_H; y++) {
+                  Color g = ((x + y) % 3 == 0)
+                            ? id(mc_grass_dark)
+                            : id(mc_grass);
+                  it.draw_pixel_at(x, y, g);
+              }
+          }
+
+          // ===== INNER Black PANEL =====
+          it.filled_rectangle(
+              BORDER + 1,
+              BORDER + GRASS_H + 1,
+              W - (BORDER * 2) - 2,
+              H - (BORDER * 2) - GRASS_H - 2,
+              id(col_white)
+          );
+            //=== Clock Panel
+            int box_x = 16;
+            int box_y = 6;
+            int box_w = 34;
+            int box_h = 14;
+            it.filled_rectangle(box_x, box_y - 2, box_w, box_h, id(col_black));
+
+          //  ===== MINECRAFT clock =====
+            char time_str[8];
+            auto now = id(sntp_time).now();
+            sprintf(time_str, "%02d:%02d", now.hour, now.minute);    
+            int x1, y1, w, h;
+            it.get_text_bounds(0, 0, time_str, id(TickingTimebomb), TextAlign::TOP_LEFT, &x1, &y1, &w, &h);
+            int tx = box_x -1 + (box_w - w) / 2;
+            int ty = box_y + (box_h - h) / 2 ;
+            //it.filled_rectangle(box_x+1, box_y+1, box_w-2, box_h-2, id(col_black));
+                
+            it.print(tx, ty-3, id(TickingTimebomb), id(col_gold), time_str);
+
+          // ===== DATE BELOW time =====
+          const char *months[] = {
+            "${jan}", "${feb}", "${mar}", "${apr}", "${may}",
+            "${jun}", "${jul}", "${aug}", "${sept}",
+            "${oct}", "${nov}", "${dec}"
+          };
+
+          it.printf(
+            box_x + box_w / 2,
+            23,
+            id(font_date),
+            id(col_black),
+            TextAlign::CENTER,
+            "%d %s",
+            now.day_of_month,
+            months[now.month - 1]
+          );
+
+          // ===== MINECRAFT STEVE =====
+            const int STEVE_X = BORDER - 5;
+            const int STEVE_Y = BORDER + GRASS_H + 2;
+            
+            // S = skin, H = hair, B = shirt, P = pants, W = sword, E = eye
+            const char STEVE[21][21] = {
+              "        BBBBBBBB    ",
+              "    C   BHHHHHHB    ",
+              "   CWC  BHHHHHHB    ",
+              "   CWC  BHSSSSHB    ",
+              "   CWC  BSESSESB    ",
+              "   CWC  BSSSSSSB    ",
+              "   CWC  BSSHHSSB    ",
+              "   CWC  BBBBBBBB    ",
+              "   CWC BCBCCCCBCB   ",
+              " CCCCCCBCBCCCCBCB   ",  
+              "   BBBBSBBCCCCBBSB  ",
+              "   BSSSSBBCCCCBBSB  ",
+              "   BBBBB BCCCCB BSB ",
+              "    D    BBBBBB BSB ",
+              "    C    BPPPPB  BB ",
+              "         BPBBPB     ",
+              "         BPBBPB     ",
+              "         BPBBPB     ",
+              "         BPBBPB     ",
+              "         BPBBPB     ",
+              "         BDBBDB     "
+            };
+            
+            for (int y = 0; y < 21; y++) {
+              for (int x = 0; x < 20; x++) {
+                Color c;
+                bool draw = true;
+            
+                switch (STEVE[y][x]) {
+                  case 'H': c = id(steve_hair); break;
+                  case 'S': c = id(steve_skin); break;
+                  case 'E': c = id(steve_eye); break;
+                  case 'C': c = id(steve_shirt); break;
+                  case 'P': c = id(steve_pants); break;
+                  case 'W': c = id(col_white); break;
+                  case 'D': c = id(steve_sword_dark); break;
+                  case 'B': c = id(col_black); break;
+                  default: draw = false;
+                }
+            
+                if (draw) {
+                  it.draw_pixel_at(
+                    STEVE_X + x,
+                    STEVE_Y + y,
+                    c
+                  );
+                }
+              }
+            }
+            
+          // --- Middle: Weather icon ---
+            std::string weather_stat = id(ha_weather_state).state;
+
+            const char* icon = "\U000F0590";
+            Color icon_color = id(col_white);
+            bool is_rain = false;
+
+            if (weather_stat == "sunny") {
+                icon = "\U000F05A8";
+                icon_color = id(col_gold);
+
+            } else if (weather_stat.find("rain") != std::string::npos) {
+                icon = "\U000F0590";   // cloudy icon for rain
+                icon_color = id(col_white);
+                is_rain = true;
+            } else if (weather_stat == "lightning" || weather_stat == "lightning-rainy") {
+                icon = "\U000F0593";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "windy" || weather_stat == "windy-variant") {
+                icon = "\U000F059D";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "clear-night" || weather_stat == "clearnight") {
+                icon = "\U000F0594";
+                icon_color = id(col_white);
+
+            } else if (weather_stat == "cloudy" || weather_stat == "partlycloudy") {
+                icon = "\U000F0590";
+                icon_color = id(col_white);
+            }
+            const int weather_X = BORDER + 30;
+            // draw icon WITH color
+            it.printf(
+                weather_X, 1,
+                id(icon_font_9),
+                icon_color,
+                TextAlign::CENTER,
+                "%s",
+                icon
+            );
+            // 3 Rain drop animation overlay
+            
+            auto draw_rain = [&](int drop_x1, int drop_start_y) {
+                int drop_x2 = drop_x1 + 2;
+                int drop_x3 = drop_x1 + 4;
+
+                uint32_t fall_dur    = 500;
+                uint32_t stagger     = fall_dur * 6 / 10;
+                uint32_t period      = stagger * 3;
+                uint32_t visible     = fall_dur * 4 / 5;
+                uint32_t drop_travel = 4;
+
+                uint32_t t = millis() % period;
+
+                auto draw_drop = [&](int x, uint32_t phase_offset) {
+                    uint32_t lt = (t + period - phase_offset) % period;
+                    if (lt < fall_dur) {
+                        int offset = (int)(lt * drop_travel) / (int)fall_dur;
+                        if (lt < visible) {
+                            it.draw_pixel_at(x, drop_start_y + offset,     id(col_white));
+                            it.draw_pixel_at(x, drop_start_y + offset + 1, id(col_white));
+                        }
+                    }
+                };
+
+                draw_drop(drop_x1, 0);
+                draw_drop(drop_x2, stagger);
+                draw_drop(drop_x3, stagger * 2);
+            };
+            // Draw rain drops
+            if (is_rain){
+              draw_rain(31, 4);
+            }
+          // ===== MINECRAFT Zombie (Animated – stepped) =====
+            const int ZOMBIE_BASE_X = BORDER + 50;
+            const int ZOMBIE_Y      = BORDER + GRASS_H + 13;
+
+            const char ZOMBIE[10][9] = {
+              "   LLGG ",
+              "   BLBL ",
+              "   LWGG ",
+              "GGCCGLLC",
+              "GGCCCGGC",
+              "   CCCC ",
+              "   EECC ",
+              "   EEEE ",
+              "   EEEE ",
+              "   DDDD "
+            };
+
+            int ZOMBIE_X = ZOMBIE_BASE_X + id(zombie_offset);
+            bool facing_left = (id(zombie_dir) < 0);
+
+            // ---- clear zombie movement area ----
+            it.filled_rectangle(
+              ZOMBIE_BASE_X - 4,
+              ZOMBIE_Y,
+              12,
+              10,
+              id(col_white)
+            );
+
+            // ---- draw zombie ----
+            for (int y = 0; y < 10; y++) {
+              for (int x = 0; x < 8; x++) {
+                int sx = facing_left ? x : (7 - x);
+                Color c;
+                bool draw = true;
+                switch (ZOMBIE[y][sx]) {
+                  case 'E': c = id(steve_eye);        break;
+                  case 'C': c = id(steve_shirt);      break;
+                  case 'D': c = id(steve_sword_dark); break;
+                  case 'B': c = id(col_black);        break;
+                  case 'L': c = id(col_lime);         break;
+                  case 'G': c = id(col_green);        break;
+                  default:  draw = false;
+                }
+                if (draw) {
+                  it.draw_pixel_at(ZOMBIE_X + x, ZOMBIE_Y + y, c);
+                }
+              }
+            }
+          id(draw_display).execute();
+
+      - id: network_page
+        lambda: |-
+          it.fill(Color(0, 0, 0));
+          // Title
+          it.print(it.get_width() / 2, 1, id(font_medium), TextAlign::TOP_CENTER, "W I F I");
+
+          // Horizontal divider
+          it.line(0, 11, it.get_width(), 11);
+          // Fill brown into bottom half of the screen
+          it.filled_rectangle(0, it.get_height()/2 - 3, it.get_width(), it.get_height()/2 + 3, id(col_black));
+          // IP Address from wifi_info text sensor
+          it.print(1, 12, id(font_medium), "IP:");
+          if (id(device_ip).has_state()) {
+            it.print(31, 26, id(font_medium), TextAlign::CENTER, id(device_ip).state.c_str());
+
+          } else {
+            it.print(31, 26, id(font_medium), TextAlign::CENTER, "...");
+          }
+      - id: volume_page
+        lambda: |-
+          int volume_percent = round(id(speaker_volume_target) * 100);
+          it.printf(13, 12, id(icon_font_13), id(col_white), "\U000F057E");
+          it.printf(24, 10, id(TickingTimebomb), id(col_white), " : %d%%", volume_percent);
+
+font:
+  - file:
+      type: gfonts
+      family: ${font_family_clock}
+      weight: 500
+    id: TickingTimebomb
+    size: 13
+  - file:
+      type: gfonts
+      family: ${font_family_clock}
+      weight: 500
+    id: font_date
+    size: 9
+  - file:
+      type: gfonts
+      family: ${font_family_clock}
+      weight: 500
+    id: font_medium
+    size: 9
+  - file:
+      type: gfonts
+      family: ${font_family_clock}
+      weight: 500
+    id: font_small
+    size: 7
+  - file: "https://github.com/chickymonkey/esphome/raw/refs/heads/main/font/materialdesignicons-webfont.ttf"
+    id: icon_font_9
+    size: 9
+    glyphs: &icon_glyphs
+      - "\U000F009E"#bell
+      - "\U000F0150"#clock
+      - "\U000F0493"#settings cog
+      - "\U000F04AD"#next track
+      - "\U000F04AE"#previous track
+      - "\U000F04B9"#living room
+      - "\U000F04DB"#stop
+      - "\U000F0502"#screen settings
+      - "\U000F050F"#temp sensor
+      - "\U000F0521"#toggle on
+      - "\U000F05CB"#voice
+      - "\U000F068A"#alarm home
+      - "\U000F06E8"#light bulb illuminated
+      - "\U000F075A"#music
+      - "\U000F057E"#Vol high
+      - "\U000F075D"#vol plus
+      - "\U000F075E"#vol minus
+      - "\U000F07D0"#api connected
+      - "\U000F087B"#api disconnected
+      - "\U000F08D6"#settings
+      - "\U000F099D"#alarm away
+      - "\U000F099E"#disarmed
+      - "\U000F0A19"#toggle off
+      - "\U000F0B26"#down
+      - "\U000F0B28"#left
+      - "\U000F0B2A"#right
+      - "\U000F0B2C"#up
+      - "\U000F0B6C"#car battery
+      - "\U000F0D90"#screen off
+      - "\U000F0EBA"#stats
+      - "\U000F0ED4"#voice off
+      - "\U000F0FCE"#scene
+      - "\U000F10CD"#battery warning
+      - "\U000F16BC"#wifidisconnected
+      - "\U000F16BD"#wifi connected
+      - "\U000F1C3B"#battery charging/usb powered
+      - "\U000F1C6F"#info
+      - "\U000F0590" #cloudy
+      - "\U000F0596" #rainy
+      - "\U000F05A8" #sunny
+      - "\U000F0593" #storm
+      - "\U000F059D" #windy
+      - "\U000F0594" #clear night
+  - file: "https://github.com/chickymonkey/esphome/raw/refs/heads/main/font/materialdesignicons-webfont.ttf"
+    id: icon_font_13
+    size: 13
+    glyphs: &icon_glyphs_13
+      - "\U000F009E"#bell
+      - "\U000F0150"#clock
+      - "\U000F0493"#settings cog
+      - "\U000F04AD"#next track
+      - "\U000F04AE"#previous track
+      - "\U000F04B9"#living room
+      - "\U000F04DB"#stop
+      - "\U000F0502"#screen settings
+      - "\U000F050F"#temp sensor
+      - "\U000F0521"#toggle on
+      - "\U000F05CB"#voice
+      - "\U000F068A"#alarm home
+      - "\U000F06E8"#light bulb illuminated
+      - "\U000F075A"#music
+      - "\U000F057E"#Vol high
+      - "\U000F075D"#vol plus
+      - "\U000F075E"#vol minus
+web_server:
+  port: 80
+time:
+  - platform: homeassistant
+    id: sntp_time
+#    timezone: "Australia/Melbourne"
+    on_time:
+      - seconds: 0
+        then:
+          - component.update: matrix_display
+          - lambda: |-
+              if (id(matrix_backlight).current_values.is_on()) {
+                int brightness = id(sunstate).is_above_horizon() 
+                  ? ${day_brightness} 
+                  : ${night_brightness};
+                id(matrix_display).set_brightness(brightness);
+              }
+
+sun:
+  id: sunstate
+  latitude: -37.8162°
+  longitude: 144.9640°
+
+sensor:
+  - platform: sun
+    name: Sun Elevation
+    type: elevation
+    update_interval: 300s
+  - platform: sun
+    name: Sun Azimuth
+    type: azimuth
+    update_interval: 300s
+
+  - platform: shtcx
+    temperature:
+      name: "Study Temperature"
+      id: study_temp
+      filters:
+        - offset: -11
+
+    humidity:
+      name: "Study Humidity"
+      id: study_humidity
+      filters:
+        - offset: 15
+    update_interval: 120s
+    i2c_id: i2c_adc_dac
+
+  - platform: template
+    name: "Accel X"
+    id: accel_x
+    unit_of_measurement: "g"
+    accuracy_decimals: 2
+    update_interval: 500ms
+    internal: true
+    lambda: |-
+      uint8_t reg = 0x35;   // Accel X LSB
+      uint8_t data[2];
+      if (id(i2c_adc_dac)->write_readv(0x6B, &reg, 1, data, 2) != i2c::ERROR_OK)
+        return NAN;
+
+      int16_t raw = (int16_t)((data[1] << 8) | data[0]);
+
+      // ±2g scale
+      return raw / 16384.0;
+
+  - platform: template
+    name: "Accel Y"
+    id: accel_y
+    unit_of_measurement: "g"
+    accuracy_decimals: 2
+    update_interval: 400ms
+    internal: true
+    lambda: |-
+      uint8_t reg = 0x37;   // Accel Y LSB
+      uint8_t data[2];
+      if (id(i2c_adc_dac)->write_readv(0x6B, &reg, 1, data, 2) != i2c::ERROR_OK)
+        return NAN;
+
+      int16_t raw = (int16_t)((data[1] << 8) | data[0]);
+
+      // ±2g scale
+      return raw / 16384.0;
+
+  - platform: template
+    name: "Accel Z"
+    id: accel_z
+    unit_of_measurement: "g"
+    accuracy_decimals: 2
+    update_interval: 300ms
+    internal: true
+    lambda: |-
+      uint8_t reg = 0x39;   // Accel Z LSB
+      uint8_t data[2];
+      if (id(i2c_adc_dac)->write_readv(0x6B, &reg, 1, data, 2) != i2c::ERROR_OK)
+        return NAN;
+
+      int16_t raw = (int16_t)((data[1] << 8) | data[0]);
+      return raw / 16384.0;
+
+binary_sensor:
+  - platform: template
+    name: "Wake Word Listening"
+    id: mww_status
+    icon: "mdi:microphone"
+    device_class: sound
+    lambda: |-
+      return id(g_mww_running);
+
+text_sensor:
+  - platform: homeassistant
+    id: ha_weather_state
+    entity_id: weather.berwick
+
+  - platform: wifi_info
+    ip_address:
+      name: Device IP Address
+      id: device_ip
+      on_value:
+        then:
+          - component.update: matrix_display
+    ssid:
+      id: wifi_ssid
+      name: "WiFi SSID"
+
+  - platform: homeassistant
+    id: study_room_speaker_state
+    entity_id: ${speaker_in_ma}
+  # Forensic trail of barge-in decisions — see the barge_log script.
+  - platform: template
+    name: "Barge Trail"
+    id: barge_trail
+    entity_category: diagnostic
+    update_interval: never
+
+select:
+  - platform: template
+    name: "Matrix Display Page"
+    id: display_page
+    restore_value: True
+    options:
+      - "Mario"
+      - "Minecraft"
+      - "Network"
+    initial_option: "Mario"
+    optimistic: true
+    set_action:
+      - lambda: |-
+          if (x == "Mario") {
+            id(page_no) = 1;
+            id(matrix_display).show_page(id(mario_page));
+            id(mario_anim_state) = 0;
+            id(mario_anim_tick)  = 0;
+            id(mario_y)          = id(mario_base_y);
+          } else if (x == "Minecraft") {
+            id(page_no) = 2;
+            id(matrix_display).show_page(id(minecraft_page));
+          } else if (x == "Network") {
+            id(page_no) = 3;
+            id(matrix_display).show_page(id(network_page));
+          }
+      - component.update: matrix_display
+
+  - platform: template
+    entity_category: config
+    name: Wake word engine location
+    id: wake_word_engine_location
+    icon: "mdi:account-voice"
+    optimistic: true
+    restore_value: true
+    options:
+      - In Home Assistant
+      - On device
+    initial_option: On device
+    on_value:
+      - if:
+          condition:
+            lambda: return !id(init_in_progress);
+          then:
+            - wait_until:
+                lambda: return id(voice_assistant_phase) == ${voice_assist_muted_phase_id} || id(voice_assistant_phase) == ${voice_assist_idle_phase_id};
+            - if:
+                condition:
+                  lambda: return x == "In Home Assistant";
+                then:
+                  - micro_wake_word.stop
+                  - delay: 500ms
+                  - if:
+                      condition:
+                        switch.is_off: mute
+                      then:
+                        - lambda: id(va).set_use_wake_word(true);
+                        - voice_assistant.start_continuous:
+            - if:
+                condition:
+                  lambda: return x == "On device";
+                then:
+                  - lambda: id(va).set_use_wake_word(false);
+                  - voice_assistant.stop
+                  - delay: 500ms
+                  - if:
+                      condition:
+                        switch.is_off: mute
+                      then:
+                        - micro_wake_word.start
+color:
+  - id: active_timer_color
+    hex: "26ed3a"
+  - id: paused_timer_color
+    hex: "3b89e3"
+
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: false
