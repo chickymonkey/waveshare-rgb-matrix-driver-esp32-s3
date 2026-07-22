@@ -2536,31 +2536,56 @@ display:
             const int MARIO_Y = id(mario_y);
 
             // R=red, N=brown, K=skin, L=black(eye/mustache), U=blue, Y=yellow(buttons)
-            const char MARIO[16][13] = {
-              "   RRRRR    ",
-              "  RRRRRRRRR ",
-              "  NNNKKLK   ",
-              " NKNKKKLKK  ",
-              " NKNNKKKLKKK",
-              " NNKKKKLLLL ",
-              "   KKKKKKK  ",
-              "  RRURRURR  ",
-              " RRRURRURRR ",
-              "RRRRUUUURRRR",
-              "KKRUYUUYURKK",
-              "KKKUUUUUUKKK",
-              "KKUUUUUUUUKK",
-              "  UUU  UUU  ",
-              " NNN    NNN ",
-              "NNNN    NNNN"
+            const char MARIO_STAND[16][15] = {
+              "    RRRRR     ",
+              "   RRRRRRRRR  ",
+              "   NNNKKLK    ",
+              "  NKNKKKLKK   ",
+              "  NKNNKKKLKKK ",
+              "  NNKKKKLLLL  ",
+              "    KKKKKKK   ",
+              "   RRURRURR   ",
+              "  RRRURRURRR  ",
+              " RRRRUUUURRRR ",
+              " KKRUYUUYURKK ",
+              " KKKUUUUUUKKK ",
+              " KKUUUUUUUUKK ",
+              "   UUU  UUU   ",
+              "  NNN    NNN  ",
+              " NNNN    NNNN "
             };
 
+            const char MARIO_JUMP[16][15] = {
+              "    RRRRR  KKK",
+              "   RRRRRRRRRKK",
+              "   NNNKKLK KKK",
+              "  NKNKKKLKKRRR",
+              "  NKNNKKKLKKKR",
+              "  NNKKKKLLLLRR",
+              "    KKKKKKRR  ",
+              "  RRRURRURR   ",
+              " RRRRURRUR   N",
+              "KRRRRUUUUR  NN",
+              "KKKRUYUUYUUNNN",
+              "KK  UUUUUUUNNN",
+              "KKNNUUUUUUUNNN",
+              "NNNNUUUU      ",
+              "NNNUUU        ",
+              "N             "
+            };
+
+            // pick the pose based on the animation state driven by the interval
+            bool jumping = (id(mario_anim_state) == 1 ||
+                            id(mario_anim_state) == 2 ||
+                            id(mario_anim_state) == 4);
+
             for (int y = 0; y < 16; y++) {
-              for (int x = 0; x < 12; x++) {
+              for (int x = 0; x < 14; x++) {
+                char ch = jumping ? MARIO_JUMP[y][x] : MARIO_STAND[y][x];
                 Color c;
                 bool draw = true;
 
-                switch (MARIO[y][x]) {
+                switch (ch) {
                   case 'R': c = id(col_red); break;
                   case 'N': c = id(col_brown); break;
                   case 'K': c = id(col_mario_skin2); break;
@@ -2571,7 +2596,7 @@ display:
                 }
 
                 if (draw) {
-                  it.draw_pixel_at(MARIO_X + x - 5, MARIO_Y + y - 14, c);
+                  it.draw_pixel_at(MARIO_X + x - 6, MARIO_Y + y - 14, c);
                 }
               }
             }
