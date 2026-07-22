@@ -2532,190 +2532,49 @@ display:
             it.print(tx, ty, id(TickingTimebomb), id(col_black), time_str);
 
             // ===== MARIO =====
-            int px = id(mario_x);
-            int py = id(mario_y);    
-            // ----- Hat -----
-            // Row 0 – Hat1 top
-            it.draw_pixel_at(px-2, py-14, id(col_red));
-            it.draw_pixel_at(px-1, py-14, id(col_red));
-            it.draw_pixel_at(px,   py-14, id(col_red));
-            it.draw_pixel_at(px+1, py-14, id(col_red));
-            it.draw_pixel_at(px+2, py-14, id(col_red));
+            const int MARIO_X = id(mario_x);
+            const int MARIO_Y = id(mario_y);
 
-            // Row 1 – Hat2 brim
-            it.draw_pixel_at(px-3, py-13, id(col_red));
-            it.draw_pixel_at(px-2, py-13, id(col_red));
-            it.draw_pixel_at(px-1, py-13, id(col_red));
-            it.draw_pixel_at(px,   py-13, id(col_red));
-            it.draw_pixel_at(px+1, py-13, id(col_red));
-            it.draw_pixel_at(px+2, py-13, id(col_red));
-            it.draw_pixel_at(px+3, py-13, id(col_red));
-            it.draw_pixel_at(px+4, py-13, id(col_red));
-            it.draw_pixel_at(px+5, py-13, id(col_red));
+            // R=red, N=brown, K=skin, L=black(eye/mustache), U=blue, Y=yellow(buttons)
+            const char MARIO[16][13] = {
+              "   RRRRR    ",
+              "  RRRRRRRRR ",
+              "  NNNKKLK   ",
+              " NKNKKKLKK  ",
+              " NKNNKKKLKKK",
+              " NNKKKKLLLL ",
+              "   KKKKKKK  ",
+              "  RRURRURR  ",
+              " RRRURRURRR ",
+              "RRRRUUUURRRR",
+              "KKRUYUUYURKK",
+              "KKKUUUUUUKKK",
+              "KKUUUUUUUUKK",
+              "  UUU  UUU  ",
+              " NNN    NNN ",
+              "NNNN    NNNN"
+            };
 
-            // ----- Head1 ----- Hair (Brown)
-            it.draw_pixel_at(px-3, py-12, id(col_brown));
-            it.draw_pixel_at(px-2, py-12, id(col_brown));
-            it.draw_pixel_at(px-1, py-12, id(col_brown));
-            // ----- Head1 ----- Face (Skin)
-            it.draw_pixel_at(px, py-12, id(col_mario_skin2));
-            it.draw_pixel_at(px+1, py-12, id(col_mario_skin2));
-            // ----- Head1 ----- Eye
-            it.draw_pixel_at(px+2, py-12, id(col_black));
-            it.draw_pixel_at(px+3,   py-12, id(col_mario_skin2));
-            // ----- Head2 ----- Face (Skin)
-            it.draw_pixel_at(px-4, py-11, id(col_brown));
-            it.draw_pixel_at(px-3, py-11, id(col_mario_skin2));
-            it.draw_pixel_at(px-2, py-11, id(col_brown));
-            it.draw_pixel_at(px-1, py-11, id(col_mario_skin2));
-            it.draw_pixel_at(px,   py-11, id(col_mario_skin2));
-            it.draw_pixel_at(px+1, py-11, id(col_mario_skin2));
-            // ----- Head2 ----- eye
-            it.draw_pixel_at(px+2, py-11, id(col_black));
-            it.draw_pixel_at(px+3, py-11, id(col_mario_skin2));
-            it.draw_pixel_at(px+4, py-11, id(col_mario_skin2));
-            // ----- Head3 ----- Face (Skin)
-            it.draw_pixel_at(px-4, py-10, id(col_brown));
-            it.draw_pixel_at(px-3, py-10, id(col_mario_skin2));
-            it.draw_pixel_at(px-2, py-10, id(col_brown));
-            it.draw_pixel_at(px-1, py-10, id(col_brown));
-            it.draw_pixel_at(px,   py-10, id(col_mario_skin2));
-            it.draw_pixel_at(px+1, py-10, id(col_mario_skin2));
-            it.draw_pixel_at(px+2, py-10, id(col_mario_skin2));
-            // ----- Head3 ----- eye
-            it.draw_pixel_at(px+3, py-10, id(col_black));
-            // ----- Head3 ----- skin
-            it.draw_pixel_at(px+4, py-10, id(col_mario_skin2));
-            it.draw_pixel_at(px+5, py-10, id(col_mario_skin2));
-            it.draw_pixel_at(px+6, py-10, id(col_mario_skin2));
+            for (int y = 0; y < 16; y++) {
+              for (int x = 0; x < 12; x++) {
+                Color c;
+                bool draw = true;
 
-            // ----- Head4 ----- Face (Skin)
-            it.draw_pixel_at(px-4, py-9, id(col_brown));
-            it.draw_pixel_at(px-3, py-9, id(col_brown));
-            it.draw_pixel_at(px-2, py-9, id(col_mario_skin2));
-            it.draw_pixel_at(px-1, py-9, id(col_mario_skin2));
-            it.draw_pixel_at(px,   py-9, id(col_mario_skin2));
-            it.draw_pixel_at(px+1, py-9, id(col_mario_skin2));
-            // ----- Head4 ----- mustache
-            it.draw_pixel_at(px+2, py-9, id(col_black));
-            it.draw_pixel_at(px+3, py-9, id(col_black));
-            it.draw_pixel_at(px+4, py-9, id(col_black));
-            it.draw_pixel_at(px+5, py-9, id(col_black));
-            // ----- Head5 ----- neck (Skin)
-            it.draw_pixel_at(px-2, py-8, id(col_mario_skin2));
-            it.draw_pixel_at(px-1, py-8, id(col_mario_skin2));
-            it.draw_pixel_at(px,   py-8, id(col_mario_skin2));
-            it.draw_pixel_at(px+1, py-8, id(col_mario_skin2));
-            it.draw_pixel_at(px+2, py-8, id(col_mario_skin2));
-            it.draw_pixel_at(px+3, py-8, id(col_mario_skin2));
-            it.draw_pixel_at(px+4, py-8, id(col_mario_skin2));
+                switch (MARIO[y][x]) {
+                  case 'R': c = id(col_red); break;
+                  case 'N': c = id(col_brown); break;
+                  case 'K': c = id(col_mario_skin2); break;
+                  case 'L': c = id(col_black); break;
+                  case 'U': c = id(col_blue); break;
+                  case 'Y': c = id(col_yellow); break;
+                  default: draw = false;
+                }
 
-            // ----- Shirt1 (Red) -----
-            it.draw_pixel_at(px-3, py-7, id(col_red));
-            it.draw_pixel_at(px-2, py-7, id(col_red));
-            it.draw_pixel_at(px-1, py-7, id(col_blue));
-            it.draw_pixel_at(px,   py-7, id(col_red));
-            it.draw_pixel_at(px+1, py-7, id(col_red));
-            it.draw_pixel_at(px+2, py-7, id(col_blue));
-            it.draw_pixel_at(px+3, py-7, id(col_red));
-            it.draw_pixel_at(px+4, py-7, id(col_red));
-
-            // ----- Shirt2 (Red) -----
-            it.draw_pixel_at(px-4, py-6, id(col_red));
-            it.draw_pixel_at(px-3, py-6, id(col_red));
-            it.draw_pixel_at(px-2, py-6, id(col_red));
-            it.draw_pixel_at(px-1, py-6, id(col_blue));
-            it.draw_pixel_at(px,   py-6, id(col_red));
-            it.draw_pixel_at(px+1, py-6, id(col_red));
-            it.draw_pixel_at(px+2, py-6, id(col_blue));
-            it.draw_pixel_at(px+3, py-6, id(col_red));
-            it.draw_pixel_at(px+4, py-6, id(col_red));
-            it.draw_pixel_at(px+5, py-6, id(col_red));
-
-            // ----- Shirt3 (Red) -----
-            it.draw_pixel_at(px-5, py-5, id(col_red));
-            it.draw_pixel_at(px-4, py-5, id(col_red));
-            it.draw_pixel_at(px-3, py-5, id(col_red));
-            it.draw_pixel_at(px-2, py-5, id(col_red));
-            it.draw_pixel_at(px-1, py-5, id(col_blue));
-            it.draw_pixel_at(px,   py-5, id(col_blue));
-            it.draw_pixel_at(px+1, py-5, id(col_blue));
-            it.draw_pixel_at(px+2, py-5, id(col_blue));
-            it.draw_pixel_at(px+3, py-5, id(col_red));
-            it.draw_pixel_at(px+4, py-5, id(col_red));
-            it.draw_pixel_at(px+5, py-5, id(col_red));
-            it.draw_pixel_at(px+6, py-5, id(col_red));
-
-            // ----- Shirt4 Arms (Skin) -----
-            it.draw_pixel_at(px-5, py-4, id(col_mario_skin2));
-            it.draw_pixel_at(px-4, py-4, id(col_mario_skin2));
-
-            // ----- Shirt4 Arms Overalls (Blue) -----
-            it.draw_pixel_at(px-3, py-4, id(col_red));
-            it.draw_pixel_at(px-2, py-4, id(col_blue));
-            it.draw_pixel_at(px-1, py-4, id(col_yellow)); //Button
-            it.draw_pixel_at(px, py-4, id(col_blue));
-            it.draw_pixel_at(px+1, py-4, id(col_blue));
-            it.draw_pixel_at(px+2, py-4, id(col_yellow)); //Button
-            it.draw_pixel_at(px+3, py-4, id(col_blue));
-            // ----- Shirt4 Arms (Skin) -----
-            it.draw_pixel_at(px+4, py-4, id(col_red));
-            it.draw_pixel_at(px+5, py-4, id(col_mario_skin2));
-            it.draw_pixel_at(px+6, py-4, id(col_mario_skin2));
-
-            // ----- Shirt5 belly Overalls (Blue) -----
-            it.draw_pixel_at(px-5, py-3, id(col_mario_skin2));
-            it.draw_pixel_at(px-4, py-3, id(col_mario_skin2));
-            it.draw_pixel_at(px-3, py-3, id(col_mario_skin2));
-            it.draw_pixel_at(px-2, py-3, id(col_blue));
-            it.draw_pixel_at(px-1, py-3, id(col_blue));
-            it.draw_pixel_at(px, py-3, id(col_blue));
-            it.draw_pixel_at(px+1, py-3, id(col_blue));
-            it.draw_pixel_at(px+2, py-3, id(col_blue));
-            it.draw_pixel_at(px+3, py-3, id(col_blue));
-            it.draw_pixel_at(px+4, py-3, id(col_mario_skin2));
-            it.draw_pixel_at(px+5, py-3, id(col_mario_skin2));
-            it.draw_pixel_at(px+6, py-3, id(col_mario_skin2));
-
-            // ----- Shirt6 leg1 Overalls (Blue) -----
-            it.draw_pixel_at(px-5, py-2, id(col_mario_skin2));
-            it.draw_pixel_at(px-4, py-2, id(col_mario_skin2));
-            it.draw_pixel_at(px-3, py-2, id(col_blue));
-            it.draw_pixel_at(px-2, py-2, id(col_blue));
-            it.draw_pixel_at(px-1, py-2, id(col_blue));
-            it.draw_pixel_at(px, py-2, id(col_blue));
-            it.draw_pixel_at(px+1, py-2, id(col_blue));
-            it.draw_pixel_at(px+2, py-2, id(col_blue));
-            it.draw_pixel_at(px+3, py-2, id(col_blue));
-            it.draw_pixel_at(px+4, py-2, id(col_blue));
-            it.draw_pixel_at(px+5, py-2, id(col_mario_skin2));
-            it.draw_pixel_at(px+6, py-2, id(col_mario_skin2));
-
-            // ----- Shirt7 leg2 Overalls (Blue) -----
-            it.draw_pixel_at(px-3, py-1, id(col_blue));
-            it.draw_pixel_at(px-2, py-1, id(col_blue));
-            it.draw_pixel_at(px-1, py-1, id(col_blue));
-            it.draw_pixel_at(px+2, py-1, id(col_blue));
-            it.draw_pixel_at(px+3, py-1, id(col_blue));
-            it.draw_pixel_at(px+4, py-1, id(col_blue));
-
-            // ----- Shoes1 (Brown) -----
-            it.draw_pixel_at(px-4, py, id(col_brown));
-            it.draw_pixel_at(px-3, py, id(col_brown));
-            it.draw_pixel_at(px-2, py, id(col_brown));
-            it.draw_pixel_at(px+3, py, id(col_brown));
-            it.draw_pixel_at(px+4, py, id(col_brown));
-            it.draw_pixel_at(px+5, py, id(col_brown));
-            // ----- Shoes2 (Brown) -----
-            it.draw_pixel_at(px-5, py+1, id(col_brown));
-            it.draw_pixel_at(px-4, py+1, id(col_brown));
-            it.draw_pixel_at(px-3, py+1, id(col_brown));
-            it.draw_pixel_at(px-2, py+1, id(col_brown));
-
-            it.draw_pixel_at(px+3, py+1, id(col_brown));
-            it.draw_pixel_at(px+4, py+1, id(col_brown));
-            it.draw_pixel_at(px+5, py+1, id(col_brown));
-            it.draw_pixel_at(px+6, py+1, id(col_brown));
+                if (draw) {
+                  it.draw_pixel_at(MARIO_X + x - 5, MARIO_Y + y - 14, c);
+                }
+              }
+            }
           // Voice assistant status
             id(draw_display).execute();
           
@@ -3293,5 +3152,4 @@ color:
     hex: "26ed3a"
   - id: paused_timer_color
     hex: "3b89e3"
-
 
