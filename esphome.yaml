@@ -33,18 +33,18 @@ substitutions:
   font_family_clock: Roboto
   font_glyphsets: "GF_Latin_Core"
  #date - month string
-  jan: Jan
-  feb: Feb
-  mar: Mar
-  apr: Apr
-  may: May
-  jun: Jun
-  jul: Jul
-  aug: Aug
-  sept: Sep
-  oct: Oct
-  nov: Nov
-  dec: Dec
+  jan: JAN
+  feb: FEB
+  mar: MAR
+  apr: APR
+  may: MAY
+  jun: JUN
+  jul: JUL
+  aug: AUG
+  sept: SEP
+  oct: OCT
+  nov: NOV
+  dec: DEC
   
  #voice assistant
   voice_assist_idle_phase_id: "1"
@@ -157,7 +157,8 @@ api:
     key: !secret api_key
 ota:
   - platform: esphome
-    password: !secret ota_key
+    #password: !secret ota_key
+    encryption: 
     on_begin:
       - logger.log:
           level: INFO
@@ -214,7 +215,7 @@ globals:
 
   - id: col_black
     type: Color
-    initial_value: 'Color(10, 10, 10)'
+    initial_value: 'Color(15, 15, 15)'
 
   # Mario Animation state machine
   - id: mario_anim_state
@@ -248,7 +249,7 @@ globals:
 
   - id: col_orange
     type: Color
-    initial_value: 'Color(255, 87, 34)'
+    initial_value: 'Color(255, 150, 34)'
 
   - id: col_light_blue
     type: Color
@@ -274,10 +275,6 @@ globals:
   - id: col_green
     type: Color
     initial_value: 'Color(0, 144, 90)'
-
-  #- id: col_ground_fill
-  #  type: Color
-  #  initial_value: 'Color(49, 21, 11)'
   
   - id: col_ground_fill
     type: Color
@@ -290,6 +287,7 @@ globals:
   - id: col_gold
     type: Color
     initial_value: 'Color(255, 235, 59)'
+
   - id: col_sky
     type: Color
     initial_value: 'Color(120, 110, 255)'
@@ -318,12 +316,13 @@ globals:
 
   - id: mc_dirt_dark
     type: Color
-    initial_value: 'Color(100, 70, 45)'
+    initial_value: 'Color(96, 68, 42)'
+    #initial_value: 'Color(100, 70, 45)'
 
   - id: mc_dirt_light
     type: Color
-    initial_value: 'Color(145, 110, 85)'
-
+    initial_value: 'Color(105, 74, 51)'
+    #initial_value: 'Color(145, 110, 85)'
   - id: mc_grass
     type: Color
     initial_value: 'Color(95, 160, 40)'
@@ -578,7 +577,7 @@ number:
       - script.execute: apply_speaker_gain
 
 interval:
-  - interval: 1400ms
+  - interval: 1400ms #winkle stars animation
     id: twinkle_stars
     then:
       - lambda: |-
@@ -592,7 +591,7 @@ interval:
           
           id(matrix_display).update();
   
-  - interval: 200ms
+  - interval: 180ms
     id: mario_animation
     then:
       - lambda: |-
@@ -602,8 +601,8 @@ interval:
 
           switch (id(mario_anim_state)) {
 
-            case 0:  // IDLE — wait ~2.5 seconds then start jump: 12 x 200ms
-              if (id(mario_anim_tick) >= 12) {
+            case 0:  // IDLE — wait ~2.5 seconds then start jump: 14 x 180ms
+              if (id(mario_anim_tick) >= 14) {
                 id(mario_anim_state) = 1;
                 id(mario_anim_tick)  = 0;
               }
@@ -704,7 +703,6 @@ interval:
           }
           
           //Screen is laid facing up.
-          //if (isnan(x)) return;
           if (!laid && x < -0.65) {
             id(screen_laid) = true;
             laid = true;
@@ -904,6 +902,7 @@ speaker:
     sample_rate: 48000
     task_stack_in_psram: true
   - platform: resampler
+    #used in music assistant.
     id: media_resampling_speaker
     output_speaker: media_speaker_mix
     sample_rate: 48000
@@ -961,7 +960,7 @@ media_player:
             # Ensure VA stops before moving on
             - if:
                 condition:
-                  - lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+                  - lambda: return id(wake_word_engine_location).current_option() == "In Home Assistant";
                 then:
                   - wait_until:
                       - not:
@@ -1291,11 +1290,11 @@ script:
   - id: select_display_page
     then:
       - lambda: |-
-          if (id(display_page).state == "Mario") {
+          if (id(display_page).current_option() == "Mario") {
             id(matrix_display).show_page(id(mario_page));
-          } else if (id(display_page).state == "Minecraft") {
+          } else if (id(display_page).current_option() == "Minecraft") {
             id(matrix_display).show_page(id(minecraft_page));
-          } else if (id(display_page).state == "Network") {
+          } else if (id(display_page).current_option() == "Network") {
             id(matrix_display).show_page(id(network_page));
           }
       - component.update: matrix_display
@@ -1383,7 +1382,6 @@ script:
             // Update targets every ~6 frames so it feels like bouncing bars
             if ((anim_tick % 6) == 0) {
               for (int col = 0; col < 15; col++) {
-                // cheap pseudo-random via LFSR — no stdlib rand() needed
                 lfsr = (lfsr >> 1) ^ (-(lfsr & 1u) & 0xB8u);
                 uint8_t r = lfsr ^ (col * 37) ^ (uint8_t)(anim_tick >> 2);
                 if      (r < 60)  bar_tgt[col] = 0;   // ~24% chance off
@@ -1400,7 +1398,6 @@ script:
             }
             // Render — 4px wide columns (3 lit + 1 gap), starting at x=2, 15 columns = 60px
             for (int col = 0; col < 15; col++) {
-              // Hue cycles across columns + slowly shifts with tick for rainbow effect
               uint8_t hue_idx = ((col * 4) + (anim_tick >> 3)) % 24;
               Color bar_color;
               if      (hue_idx <  4) bar_color = Color(255, hue_idx * 64, 10);          // red→yellow
@@ -1422,7 +1419,7 @@ script:
           if ( id(page_no) == 1){
             
             for (int x = 0; x < width; x++) {
-              id(matrix_display).draw_pixel_at(x, 29, id(col_ground_fill));
+              id(matrix_display).draw_pixel_at(x, 29, id(col_black));
             }
             //Row 30 and 31 in either static or marquee
             if (skip_marquee) {
@@ -1749,7 +1746,7 @@ script:
               - not:
                   media_player.is_announcing:
                     id: speaker_media_player
-              - lambda: return id(wake_word_engine_location).state == "On device";
+              - lambda: return id(wake_word_engine_location).current_option() == "On device";
           then:
             - lambda: id(va).set_use_wake_word(false);
             - micro_wake_word.start:
@@ -1779,7 +1776,7 @@ script:
             and:
               - not:
                   - voice_assistant.is_running:
-              - lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+              - lambda: return id(wake_word_engine_location).current_option() == "In Home Assistant";
           then:
             - lambda: id(va).set_use_wake_word(true);
             - voice_assistant.start_continuous: # continuous wake word only supported when wake word is "In Home Assistant"
@@ -1788,13 +1785,13 @@ script:
     then:
       - if:
           condition:
-            lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+            lambda: return id(wake_word_engine_location).current_option() == "In Home Assistant";
           then:
             - lambda: id(va).set_use_wake_word(false);
             - voice_assistant.stop:
       - if:
           condition:
-            lambda: return id(wake_word_engine_location).state == "On device";
+            lambda: return id(wake_word_engine_location).current_option() == "On device";
           then:
             - micro_wake_word.stop:
 
@@ -1841,8 +1838,6 @@ script:
       - if:
           condition:
             lambda: |-
-              // If VA moved into listening again (g_va_state==1) during our wait,
-              // a continuation has already taken over — don't stop it.
               return id(g_va_state) == 1;
           then:
             - logger.log:
@@ -2106,7 +2101,39 @@ script:
                   (int)(id(speaker_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING),
                   (int)id(va).is_running());
             - lambda: 'id(g_media_started_during_va) = false;'      
+  - id: draw_seconds
+    then:
+      - lambda: |-
+          // Seconds comet on row 29, x = 2..61 (60 pixels, one per second)
+          if (id(page_no) != 1 && id(page_no) != 2) return;
 
+          // Timer bar uses rows 29-30: check the timers directly, don't trust cached flags
+          for (const auto &t : id(va).get_timers()) {
+            if (t.is_active) return;
+          }
+          // Timer finished and alarm ringing / finished phase
+          if (id(timer_ringing).state) return;
+          if (id(voice_assistant_phase) == ${voice_assist_timer_finished_phase_id}) return;
+
+          // Music visualiser also uses row 29
+          using S = media_player::MediaPlayerState;
+          if (id(speaker_media_player).state == S::MEDIA_PLAYER_STATE_PLAYING) return;
+
+          auto now = id(sntp_time).now();
+          if (!now.is_valid()) return;
+
+          const int y = 29;
+          const int x_start = 2;
+          int head = x_start + now.second;
+
+          const Color c_head = Color(255, 255, 255);
+          const Color c_mid  = Color(140, 140, 140);
+          const Color c_tail = Color(60, 60, 60);
+
+          id(matrix_display).draw_pixel_at(head, y, c_head);
+          if (head - 1 >= x_start) id(matrix_display).draw_pixel_at(head - 1, y, c_mid);
+          if (head - 2 >= x_start) id(matrix_display).draw_pixel_at(head - 2, y, c_tail);
+  #end of script
 switch:
   - platform: template
     name: Mute
@@ -2387,7 +2414,6 @@ display:
               it.filled_circle(x_cloud1 + 2, y_cloud1,     2, id(col_white));
               it.filled_rectangle(x_cloud1 - 3, y_cloud1 + 1, 6, 2, id(col_white));
             }
-
             
             // --- Right: Weather icon with animation---
 
@@ -2406,7 +2432,7 @@ display:
 
             if (weather_stat == "sunny") {
                 icon = "\U000F05A8";
-                icon_color = id(col_yellow);
+                icon_color = id(col_orange);
 
             } else if (ws.find("rain") != std::string::npos) {
                 icon = "\U000F0590";   // cloudy icon for rain
@@ -2602,6 +2628,8 @@ display:
             }
           // Voice assistant status
             id(draw_display).execute();
+          // seconds of Clock progress
+          id(draw_seconds).execute();
           
       - id: minecraft_page
         lambda: |-
@@ -2689,7 +2717,6 @@ display:
             it.get_text_bounds(0, 0, time_str, id(TickingTimebomb), TextAlign::TOP_LEFT, &x1, &y1, &w, &h);
             int tx = box_x -1 + (box_w - w) / 2;
             int ty = box_y + (box_h - h) / 2 ;
-            //it.filled_rectangle(box_x+1, box_y+1, box_w-2, box_h-2, id(col_black));
                 
             it.print(tx, ty-3, id(TickingTimebomb), id(col_gold), time_str);
 
@@ -2717,8 +2744,8 @@ display:
             
             // S = skin, H = hair, B = shirt, P = pants, W = sword, E = eye
             const char STEVE[21][21] = {
-              "        BBBBBBBB    ",
-              "    C   BHHHHHHB    ",
+              "    C   BBBBBBBB    ",
+              "   CWC  BHHHHHHB    ",
               "   CWC  BHHHHHHB    ",
               "   CWC  BHSSSSHB    ",
               "   CWC  BSESSESB    ",
@@ -2776,7 +2803,7 @@ display:
 
             if (weather_stat == "sunny") {
                 icon = "\U000F05A8";
-                icon_color = id(col_gold);
+                icon_color = id(col_orange);
 
             } else if (weather_stat.find("rain") != std::string::npos) {
                 icon = "\U000F0590";   // cloudy icon for rain
@@ -2798,16 +2825,16 @@ display:
                 icon = "\U000F0590";
                 icon_color = id(col_white);
             }
-            const int weather_X = BORDER + 30;
-            // draw icon WITH color
+            const int weather_X = BORDER + 53;
             it.printf(
-                weather_X, 1,
+                weather_X, 3,
                 id(icon_font_9),
                 icon_color,
                 TextAlign::CENTER,
                 "%s",
                 icon
             );
+            
             // 3 Rain drop animation overlay
             
             auto draw_rain = [&](int drop_x1, int drop_start_y) {
@@ -2837,11 +2864,11 @@ display:
                 draw_drop(drop_x2, stagger);
                 draw_drop(drop_x3, stagger * 2);
             };
-            // Draw rain drops
+            // Draw rain drops, BORDER is 3
             if (is_rain){
-              draw_rain(31, 4);
+              draw_rain(weather_X - 2, 6);
             }
-          // ===== MINECRAFT Zombie (Animated – stepped) =====
+          // ===== Zombie (Animated – stepped) =====
             const int ZOMBIE_BASE_X = BORDER + 50;
             const int ZOMBIE_Y      = BORDER + GRASS_H + 13;
 
@@ -2891,10 +2918,11 @@ display:
               }
             }
           id(draw_display).execute();
-
+          // seconds of Clock progress
+          id(draw_seconds).execute();
       - id: network_page
         lambda: |-
-          it.fill(Color(0, 0, 0));
+          it.fill(Color(5, 5, 5));
           // Title
           it.print(it.get_width() / 2, 1, id(font_medium), TextAlign::TOP_CENTER, "W I F I");
 
@@ -2928,7 +2956,7 @@ font:
       family: ${font_family_clock}
       weight: 500
     id: font_date
-    size: 9
+    size: 8
   - file:
       type: gfonts
       family: ${font_family_clock}
