@@ -2637,6 +2637,7 @@ display:
           const int H = 32;
           const int BORDER = 3;
           const int GRASS_H = 2;
+          const int TOP_EXTRA = 2;   // extra dirt height at the top
           it.fill(Color(0, 0, 0));
 
           // ===== DIRT BORDER =====
@@ -2644,7 +2645,7 @@ display:
               for (int y = 0; y < H; y++) {
                   bool border =
                       x < BORDER || x >= W - BORDER ||
-                      y < BORDER || y >= H - BORDER;
+                      y < BORDER + TOP_EXTRA || y >= H - BORDER;
 
                   if (border) {
                       Color c = id(mc_dirt);
@@ -2686,7 +2687,7 @@ display:
           it.draw_pixel_at(60, 27, id(mc_dirt_dark));
           // ===== GRASS STRIP =====
           for (int x = BORDER; x < W - BORDER; x++) {
-              for (int y = BORDER; y < BORDER + GRASS_H; y++) {
+              for (int y = BORDER + TOP_EXTRA; y < BORDER + TOP_EXTRA + GRASS_H; y++) {
                   Color g = ((x + y) % 3 == 0)
                             ? id(mc_grass_dark)
                             : id(mc_grass);
@@ -2697,12 +2698,12 @@ display:
           // ===== INNER Black PANEL =====
           it.filled_rectangle(
               BORDER + 1,
-              BORDER + GRASS_H + 1,
+              BORDER + TOP_EXTRA + GRASS_H + 1,
               W - (BORDER * 2) - 2,
-              H - (BORDER * 2) - GRASS_H - 2,
+              H - (BORDER * 2) - TOP_EXTRA - GRASS_H - 2,
               id(col_white)
           );
-            //=== Clock Panel
+            //== Clock Panel ==
             int box_x = 16;
             int box_y = 6;
             int box_w = 34;
@@ -2718,7 +2719,7 @@ display:
             int tx = box_x -1 + (box_w - w) / 2;
             int ty = box_y + (box_h - h) / 2 ;
                 
-            it.print(tx, ty-3, id(TickingTimebomb), id(col_gold), time_str);
+            it.print(tx, ty-4, id(TickingTimebomb), id(col_gold), time_str);
 
           // ===== DATE BELOW time =====
           const char *months[] = {
@@ -2854,8 +2855,8 @@ display:
                     if (lt < fall_dur) {
                         int offset = (int)(lt * drop_travel) / (int)fall_dur;
                         if (lt < visible) {
-                            it.draw_pixel_at(x, drop_start_y + offset,     id(col_white));
-                            it.draw_pixel_at(x, drop_start_y + offset + 1, id(col_white));
+                            it.draw_pixel_at(x, drop_start_y + offset,     id(steve_shirt));
+                            it.draw_pixel_at(x, drop_start_y + offset + 1, id(steve_shirt));
                         }
                     }
                 };
