@@ -17,7 +17,7 @@
 #   Music/radio → media_speaker (resampler) ───────────┐
 #                                                      ┼── mixer (48kHz) → hw_speaker → ES8311 DAC
 #   VA TTS      → tts_speaker (resampler) ─────────────┘
-# =============================================================================
+# =======================================================
 ---
 substitutions:
   speaker_in_ma: media_player.waveshare_matrix_clock_2
@@ -940,7 +940,6 @@ media_player:
       
     on_play:
       - lambda: |-
-          using S = media_player::MediaPlayerState;
           // Music started during a VA turn and we didn't have music before → HA started something new
           if (id(va).is_running() && !id(speaker_was_playing)) {
             ESP_LOGI("post_va_media", "Media started during VA turn, flagging for post-VA resume");
@@ -1020,11 +1019,7 @@ voice_assistant:
     - globals.set:
         id: g_va_state
         value: "1"
-    #- globals.set:
-    #    id: g_va_turn_id        # ← new global turn ID, increments each turn
-    #    value: !lambda 'return id(g_va_turn_id) + 1;'
-    # Clear the speaker-paused flag set by global_cancel. Without this, the wake-chime
-    # plus subsequent TTS would play through the paused TX path and only produce silence.
+
     - lambda: id(box_speaker).set_pause_state(false);
     - lambda: id(user_cancelled) = false;
     # A turn is starting — any deferred barge-in restart is moot now. Clearing
@@ -1900,7 +1895,7 @@ script:
           // "call ended" pages live in each renderer because not every full
           // device includes those optional UI concepts
         
-          using S = media_player::MediaPlayerState;
+          //using S = media_player::MediaPlayerState;
           auto mp_state = id(speaker_media_player).state;
           int state = ${ui_state_idle};
 
@@ -1918,9 +1913,6 @@ script:
   - id: system_state
     then:
       - lambda: |-
-          // Top-row (y=0 only) marquee for connectivity/init states.
-          // Mirrors the bottom marquee's segment-scroll style but stays
-          // confined to a single pixel row to avoid the cloud/star/weather
           // icon artwork drawn higher up on the Mario and Minecraft pages.
           const int width = 64;
           const int segment = 8;
@@ -2101,10 +2093,11 @@ script:
                   (int)(id(speaker_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING),
                   (int)id(va).is_running());
             - lambda: 'id(g_media_started_during_va) = false;'      
+
   - id: draw_seconds
     then:
       - lambda: |-
-          // Seconds comet on row 29, x = 2..61 (60 pixels, one per second)
+          // Seconds comet on row 30, x = 2..61 (60 pixels, one per second)
           if (id(page_no) != 1 && id(page_no) != 2) return;
 
           // Timer bar uses rows 29-30: check the timers directly, don't trust cached flags
@@ -2122,17 +2115,21 @@ script:
           auto now = id(sntp_time).now();
           if (!now.is_valid()) return;
 
-          const int y = 29;
+          const int y = 30;
           const int x_start = 2;
           int head = x_start + now.second;
-
+          // 5 dots color
           const Color c_head = Color(255, 255, 255);
-          const Color c_mid  = Color(140, 140, 140);
-          const Color c_tail = Color(60, 60, 60);
+          const Color c_1    = Color(180, 180, 180);
+          const Color c_2    = Color(150, 150, 150);
+          const Color c_3    = Color(120, 120, 120);
+          const Color c_tail = Color(120, 120, 120);
 
           id(matrix_display).draw_pixel_at(head, y, c_head);
-          if (head - 1 >= x_start) id(matrix_display).draw_pixel_at(head - 1, y, c_mid);
-          if (head - 2 >= x_start) id(matrix_display).draw_pixel_at(head - 2, y, c_tail);
+          if (head - 1 >= x_start) id(matrix_display).draw_pixel_at(head - 1, y, c_1);
+          if (head - 2 >= x_start) id(matrix_display).draw_pixel_at(head - 2, y, c_2);
+          if (head - 3 >= x_start) id(matrix_display).draw_pixel_at(head - 3, y, c_3);
+          if (head - 4 >= x_start) id(matrix_display).draw_pixel_at(head - 4, y, c_tail);
   #end of script
 switch:
   - platform: template
@@ -2458,7 +2455,7 @@ display:
 
             // Draw icon
             it.printf(
-                59, 3,
+                59, 2,
                 id(icon_font_9),
                 icon_color,
                 TextAlign::CENTER,
@@ -2496,7 +2493,7 @@ display:
             };
             
             if (is_rain){
-              draw_rain(57, 6);
+              draw_rain(57, 5);
             }
               
             // temperature
@@ -2634,10 +2631,10 @@ display:
       - id: minecraft_page
         lambda: |-
           const int W = 64;
-          const int H = 32;
+          const int H = 33;
           const int BORDER = 3;
           const int GRASS_H = 2;
-          const int TOP_EXTRA = 2;   // extra dirt height at the top
+          const int TOP_EXTRA = 5;   // extra dirt height at the top
           it.fill(Color(0, 0, 0));
 
           // ===== DIRT BORDER =====
@@ -2696,11 +2693,12 @@ display:
           }
 
           // ===== INNER Black PANEL =====
+                  
           it.filled_rectangle(
-              BORDER + 1,
-              BORDER + TOP_EXTRA + GRASS_H + 1,
-              W - (BORDER * 2) - 2,
-              H - (BORDER * 2) - TOP_EXTRA - GRASS_H - 2,
+              BORDER,
+              BORDER + TOP_EXTRA + GRASS_H,
+              W - (BORDER * 2),
+              H - (BORDER * 2) - TOP_EXTRA - GRASS_H,
               id(col_white)
           );
             //== Clock Panel ==
@@ -2738,189 +2736,221 @@ display:
             now.day_of_month,
             months[now.month - 1]
           );
-
+          // temperature - left top
+            if (id(study_temp).has_state()) {
+              it.printf(9, 3, id(font_small), TextAlign::CENTER, "%.0f°C", id(study_temp).state);
+            } else {
+              it.print(9, 3, id(font_small), TextAlign::CENTER, "...");
+            }
+            
           // ===== MINECRAFT STEVE =====
-            const int STEVE_X = BORDER - 5;
-            const int STEVE_Y = BORDER + GRASS_H + 2;
-            
-            // S = skin, H = hair, B = shirt, P = pants, W = sword, E = eye
-            const char STEVE[21][21] = {
-              "    C   BBBBBBBB    ",
-              "   CWC  BHHHHHHB    ",
-              "   CWC  BHHHHHHB    ",
-              "   CWC  BHSSSSHB    ",
-              "   CWC  BSESSESB    ",
-              "   CWC  BSSSSSSB    ",
-              "   CWC  BSSHHSSB    ",
-              "   CWC  BBBBBBBB    ",
-              "   CWC BCBCCCCBCB   ",
-              " CCCCCCBCBCCCCBCB   ",  
-              "   BBBBSBBCCCCBBSB  ",
-              "   BSSSSBBCCCCBBSB  ",
-              "   BBBBB BCCCCB BSB ",
-              "    D    BBBBBB BSB ",
-              "    C    BPPPPB  BB ",
-              "         BPBBPB     ",
-              "         BPBBPB     ",
-              "         BPBBPB     ",
-              "         BPBBPB     ",
-              "         BPBBPB     ",
-              "         BDBBDB     "
-            };
-            
-            for (int y = 0; y < 21; y++) {
-              for (int x = 0; x < 20; x++) {
-                Color c;
-                bool draw = true;
-            
-                switch (STEVE[y][x]) {
-                  case 'H': c = id(steve_hair); break;
-                  case 'S': c = id(steve_skin); break;
-                  case 'E': c = id(steve_eye); break;
-                  case 'C': c = id(steve_shirt); break;
-                  case 'P': c = id(steve_pants); break;
-                  case 'W': c = id(col_white); break;
-                  case 'D': c = id(steve_sword_dark); break;
-                  case 'B': c = id(col_black); break;
-                  default: draw = false;
-                }
-            
-                if (draw) {
-                  it.draw_pixel_at(
-                    STEVE_X + x,
-                    STEVE_Y + y,
-                    c
-                  );
-                }
+          const int STEVE_X = BORDER - 5;
+          const int STEVE_Y = BORDER + GRASS_H + 2;
+
+          // S = skin, H = hair, B = shirt, P = pants, W = sword, E = eye
+          const char STEVE[22][21] = {
+            "    C   BBBBBBBB    ",
+            "   CWC  BHHHHHHB    ",
+            "   CWC  BHHHHHHB    ",
+            "   CWC  BHSSSSHB    ",
+            "   CWC  BSESSESB    ",
+            "   CWC  BSSSSSSB    ",
+            "   CWC  BSSHHSSB    ",
+            "   CWC  BBBBBBBB    ",
+            "   CWC BCBCCCCBCB   ",
+            " PPPPPPBCBCCCCBCB   ",  
+            "   BBBBSBBCCCCBBSB  ",
+            "   BSSSSBBCCCCBBSB  ",
+            "   BBBBB BCCCCB BSB ",
+            "    P    BBBBBB BSB ",
+            "    P    BPPPPB  BB ",
+            "   RRR   BPBBPB     ",
+            "    R    BPBBPB     ",
+            "         BPBBPB     ",
+            "         BPBBPB     ",
+            "         BPBBPB     ",
+            "         BDBBDB     ",
+            "         BDBBDB     "
+          };
+
+          for (int y = 0; y < 22; y++) {
+            for (int x = 0; x < 20; x++) {
+              Color c;
+              bool draw = true;
+
+              switch (STEVE[y][x]) {
+                case 'H': c = id(steve_hair); break;
+                case 'S': c = id(steve_skin); break;
+                case 'E': c = id(steve_eye); break;
+                case 'C': c = id(steve_shirt); break;
+                case 'P': c = id(steve_pants); break;
+                case 'W': c = id(col_white); break;
+                case 'D': c = id(steve_sword_dark); break;
+                case 'B': c = id(col_black); break;
+                case 'R': c = id(col_red); break;
+                default: draw = false;
+              }
+
+              if (draw) {
+                it.draw_pixel_at(
+                  STEVE_X + x,
+                  STEVE_Y + y,
+                  c
+                );
               }
             }
-            
+          }
+
           // --- Middle: Weather icon ---
-            std::string weather_stat = id(ha_weather_state).state;
+          std::string weather_stat = id(ha_weather_state).state;
 
-            const char* icon = "\U000F0590";
-            Color icon_color = id(col_white);
-            bool is_rain = false;
+          const char* icon = "\U000F0590";
+          Color icon_color = id(col_white);
+          bool is_rain = false;
 
-            if (weather_stat == "sunny") {
-                icon = "\U000F05A8";
-                icon_color = id(col_orange);
+          if (weather_stat == "sunny") {
+              icon = "\U000F05A8";
+              icon_color = id(col_orange);
 
-            } else if (weather_stat.find("rain") != std::string::npos) {
-                icon = "\U000F0590";   // cloudy icon for rain
-                icon_color = id(col_white);
-                is_rain = true;
-            } else if (weather_stat == "lightning" || weather_stat == "lightning-rainy") {
-                icon = "\U000F0593";
-                icon_color = id(col_white);
+          } else if (weather_stat.find("rain") != std::string::npos) {
+              icon = "\U000F0590";
+              icon_color = id(col_white);
+              is_rain = true;
 
-            } else if (weather_stat == "windy" || weather_stat == "windy-variant") {
-                icon = "\U000F059D";
-                icon_color = id(col_white);
+          } else if (weather_stat == "lightning" || weather_stat == "lightning-rainy") {
+              icon = "\U000F0593";
+              icon_color = id(col_white);
 
-            } else if (weather_stat == "clear-night" || weather_stat == "clearnight") {
-                icon = "\U000F0594";
-                icon_color = id(col_white);
+          } else if (weather_stat == "windy" || weather_stat == "windy-variant") {
+              icon = "\U000F059D";
+              icon_color = id(col_white);
 
-            } else if (weather_stat == "cloudy" || weather_stat == "partlycloudy") {
-                icon = "\U000F0590";
-                icon_color = id(col_white);
-            }
-            const int weather_X = BORDER + 53;
-            it.printf(
-                weather_X, 3,
-                id(icon_font_9),
-                icon_color,
-                TextAlign::CENTER,
-                "%s",
-                icon
-            );
-            
-            // 3 Rain drop animation overlay
-            
-            auto draw_rain = [&](int drop_x1, int drop_start_y) {
-                int drop_x2 = drop_x1 + 2;
-                int drop_x3 = drop_x1 + 4;
+          } else if (weather_stat == "clear-night" || weather_stat == "clearnight") {
+              icon = "\U000F0594";
+              icon_color = id(col_white);
 
-                uint32_t fall_dur    = 500;
-                uint32_t stagger     = fall_dur * 6 / 10;
-                uint32_t period      = stagger * 3;
-                uint32_t visible     = fall_dur * 4 / 5;
-                uint32_t drop_travel = 4;
+          } else if (weather_stat == "cloudy" || weather_stat == "partlycloudy") {
+              icon = "\U000F0590";
+              icon_color = id(col_white);
+          }
 
-                uint32_t t = millis() % period;
+          const int weather_X = BORDER + 53;
 
-                auto draw_drop = [&](int x, uint32_t phase_offset) {
-                    uint32_t lt = (t + period - phase_offset) % period;
-                    if (lt < fall_dur) {
-                        int offset = (int)(lt * drop_travel) / (int)fall_dur;
-                        if (lt < visible) {
-                            it.draw_pixel_at(x, drop_start_y + offset,     id(steve_shirt));
-                            it.draw_pixel_at(x, drop_start_y + offset + 1, id(steve_shirt));
-                        }
-                    }
-                };
+          it.printf(
+              weather_X, 2,
+              id(icon_font_9),
+              icon_color,
+              TextAlign::CENTER,
+              "%s",
+              icon
+          );
 
-                draw_drop(drop_x1, 0);
-                draw_drop(drop_x2, stagger);
-                draw_drop(drop_x3, stagger * 2);
-            };
-            // Draw rain drops, BORDER is 3
-            if (is_rain){
-              draw_rain(weather_X - 2, 6);
-            }
+          // 3 Rain drop animation overlay
+
+          auto draw_rain = [&](int drop_x1, int drop_start_y) {
+              int drop_x2 = drop_x1 + 2;
+              int drop_x3 = drop_x1 + 4;
+
+              uint32_t fall_dur    = 500;
+              uint32_t stagger     = fall_dur * 6 / 10;
+              uint32_t period      = stagger * 3;
+              uint32_t visible     = fall_dur * 4 / 5;
+              uint32_t drop_travel = 4;
+
+              uint32_t t = millis() % period;
+
+              auto draw_drop = [&](int x, uint32_t phase_offset) {
+                  uint32_t lt = (t + period - phase_offset) % period;
+                  if (lt < fall_dur) {
+                      int offset = (int)(lt * drop_travel) / (int)fall_dur;
+                      if (lt < visible) {
+                          it.draw_pixel_at(
+                            x,
+                            drop_start_y + offset,
+                            id(col_white)
+                          );
+                          
+                          it.draw_pixel_at(
+                            x,
+                            drop_start_y + offset + 1,
+                            id(col_white)
+                          );
+                      }
+                  }
+              };
+
+              draw_drop(drop_x1, 0);
+              draw_drop(drop_x2, stagger);
+              draw_drop(drop_x3, stagger * 2);
+          };
+
+          // Draw rain drops, BORDER is 3
+          if (is_rain) {
+              draw_rain(weather_X - 2, 5);
+          }
+
           // ===== Zombie (Animated – stepped) =====
-            const int ZOMBIE_BASE_X = BORDER + 50;
-            const int ZOMBIE_Y      = BORDER + GRASS_H + 13;
+          const int ZOMBIE_BASE_X = BORDER + 50;
+          const int ZOMBIE_Y      = BORDER + GRASS_H + 13;
 
-            const char ZOMBIE[10][9] = {
-              "   LLGG ",
-              "   BLBL ",
-              "   LWGG ",
-              "GGCCGLLC",
-              "GGCCCGGC",
-              "   CCCC ",
-              "   EECC ",
-              "   EEEE ",
-              "   EEEE ",
-              "   DDDD "
-            };
+          const char ZOMBIE[11][9] = {
+            "   LLGG ",
+            "   BLBL ",
+            "   LWGG ",
+            "GGCCGLLC",
+            "GGCCCGGC",
+            "   CCCC ",
+            "   EECC ",
+            "   EEEE ",
+            "   EEEE ",
+            "   EEEE ",
+            "   DDDD "
+          };
 
-            int ZOMBIE_X = ZOMBIE_BASE_X + id(zombie_offset);
-            bool facing_left = (id(zombie_dir) < 0);
+          int ZOMBIE_X = ZOMBIE_BASE_X + id(zombie_offset);
+          bool facing_left = (id(zombie_dir) < 0);
 
-            // ---- clear zombie movement area ----
-            it.filled_rectangle(
-              ZOMBIE_BASE_X - 4,
-              ZOMBIE_Y,
-              12,
-              10,
-              id(col_white)
-            );
+          // ---- clear zombie movement area ----
+          it.filled_rectangle(
+            ZOMBIE_BASE_X - 4,
+            ZOMBIE_Y,
+            12,
+            11,
+            id(col_white)
+          );
 
-            // ---- draw zombie ----
-            for (int y = 0; y < 10; y++) {
-              for (int x = 0; x < 8; x++) {
-                int sx = facing_left ? x : (7 - x);
-                Color c;
-                bool draw = true;
-                switch (ZOMBIE[y][sx]) {
-                  case 'E': c = id(steve_eye);        break;
-                  case 'C': c = id(steve_shirt);      break;
-                  case 'D': c = id(steve_sword_dark); break;
-                  case 'B': c = id(col_black);        break;
-                  case 'L': c = id(col_lime);         break;
-                  case 'G': c = id(col_green);        break;
-                  default:  draw = false;
-                }
-                if (draw) {
-                  it.draw_pixel_at(ZOMBIE_X + x, ZOMBIE_Y + y, c);
-                }
+          // ---- draw zombie ----
+          for (int y = 0; y < 11; y++) {
+            for (int x = 0; x < 8; x++) {
+              int sx = facing_left ? x : (7 - x);
+              Color c;
+              bool draw = true;
+
+              switch (ZOMBIE[y][sx]) {
+                case 'E': c = id(steve_eye);        break;
+                case 'C': c = id(steve_shirt);      break;
+                case 'D': c = id(steve_sword_dark); break;
+                case 'B': c = id(col_black);        break;
+                case 'L': c = id(col_lime);         break;
+                case 'G': c = id(col_green);        break;
+                default:  draw = false;
+              }
+
+              if (draw) {
+                it.draw_pixel_at(
+                  ZOMBIE_X + x,
+                  ZOMBIE_Y + y,
+                  c
+                );
               }
             }
+          }
+
           id(draw_display).execute();
+
           // seconds of Clock progress
           id(draw_seconds).execute();
+          
       - id: network_page
         lambda: |-
           it.fill(Color(5, 5, 5));
